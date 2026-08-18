@@ -1,17 +1,13 @@
 //------------------------------------------------------------------------------------------------
-// BPS - Base Protection System
-//
-// Character damage interception.
+// BPS - Character damage protection
 //------------------------------------------------------------------------------------------------
 
 modded class SCR_CharacterDamageManagerComponent
 {
-	//------------------------------------------------------------------------------------------------
 	override bool HijackDamageHandling(
 		notnull BaseDamageContext damageContext
 	)
 	{
-		// Damage authority only.
 		if (
 			!Replication.IsRunning() ||
 			Replication.IsServer()

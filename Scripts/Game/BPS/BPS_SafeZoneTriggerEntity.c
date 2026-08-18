@@ -1,27 +1,34 @@
 //------------------------------------------------------------------------------------------------
 // BPS - Base Protection System
 //
-// Character-only core implementation.
+// CHARACTER CORE
 //
-// Features:
 // - Native spherical trigger
-// - Protected faction
+// - Direct character detection
+// - Vehicle occupant detection
 // - Friendly enter/exit messages
 // - Enemy countdown + execution
-// - Safe Zone damage protection
-// - Friendly fire blocking
-// - Combat Lock when firing
+// - Character Safe Zone protection
+// - Friendly fire blocking only when BOTH players are inside
+// - Combat Lock after firing
 //------------------------------------------------------------------------------------------------
 
 
 //------------------------------------------------------------------------------------------------
-// Runtime state for one character.
+// Runtime state of one character.
 //------------------------------------------------------------------------------------------------
 class BPS_CharacterState
 {
 	IEntity m_Character;
 
-	bool m_bInside;
+	// Character itself is detected by the trigger.
+	bool m_bDirectInside;
+
+	// Character is occupying a vehicle detected by the trigger.
+	bool m_bVehicleInside;
+
+	// Consolidated state from previous tick.
+	bool m_bWasInside;
 
 	// Enemy intrusion
 	int m_iIntruderStartTime;
@@ -29,6 +36,9 @@ class BPS_CharacterState
 
 	// Combat lock
 	int m_iCombatLockStartTime;
+
+	// Friendly fire message cooldown
+	int m_iFriendlyFireMessageTime;
 
 	// Weapon tracking
 	BaseWeaponComponent m_Weapon;
@@ -43,12 +53,16 @@ class BPS_CharacterState
 	{
 		m_Character = character;
 
-		m_bInside = false;
+		m_bDirectInside = false;
+		m_bVehicleInside = false;
+		m_bWasInside = false;
 
 		m_iIntruderStartTime = -1;
 		m_iLastIntruderSecond = -1;
 
 		m_iCombatLockStartTime = -1;
+
+		m_iFriendlyFireMessageTime = -1;
 
 		m_Weapon = null;
 		m_Muzzle = null;
@@ -56,13 +70,23 @@ class BPS_CharacterState
 		m_iLastAmmo = -1;
 		m_bWeaponInitialized = false;
 	}
+
+
+	//------------------------------------------------------------------------------------------------
+	bool IsInside()
+	{
+		return (
+			m_bDirectInside ||
+			m_bVehicleInside
+		);
+	}
 }
 
 
 //------------------------------------------------------------------------------------------------
 [EntityEditorProps(
 	category: "BPS/Base Protection System",
-	description: "Spherical character Safe Zone."
+	description: "Spherical Base Protection System Safe Zone."
 )]
 class BPS_SafeZoneTriggerEntityClass : SCR_BaseTriggerEntityClass
 {
@@ -73,9 +97,7 @@ class BPS_SafeZoneTriggerEntityClass : SCR_BaseTriggerEntityClass
 class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 {
 	// =============================================================================================
-	// INTERNAL CONSTANTS
-	//
-	// Not exposed in prefab.
+	// INTERNAL
 	// =============================================================================================
 
 	protected static const float BPS_TRIGGER_UPDATE_RATE = 0.25;
@@ -84,11 +106,11 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 
 	protected static const float BPS_COUNTDOWN_HINT_DURATION = 1.1;
 
+	protected static const int BPS_FRIENDLY_FIRE_MESSAGE_COOLDOWN_MS = 2000;
+
 
 	// =============================================================================================
-	// ACTIVE ZONES
-	//
-	// Used by the DamageManager hook.
+	// GLOBAL ZONE REGISTRY
 	// =============================================================================================
 
 	protected static ref array<BPS_SafeZoneTriggerEntity> s_aZones =
@@ -96,13 +118,13 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 
 
 	// =============================================================================================
-	// FACTION
+	// CONFIGURATION
 	// =============================================================================================
 
 	[Attribute(
 		"US",
 		UIWidgets.EditBox,
-		"Protected faction key. Vanilla examples: US, USSR."
+		"Protected faction key. Vanilla: US or USSR."
 	)]
 	protected FactionKey m_sProtectedFactionKey;
 
@@ -114,7 +136,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"1",
 		UIWidgets.CheckBox,
-		"Show a message when a friendly player enters or leaves the Safe Zone."
+		"Show enter and exit messages to friendly players."
 	)]
 	protected bool m_bShowFriendlyEnterExitMessages;
 
@@ -122,7 +144,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"SAFE ZONE",
 		UIWidgets.EditBox,
-		"Friendly enter title. Supports localization keys."
+		"Supports localization keys."
 	)]
 	protected string m_sFriendlyEnterTitle;
 
@@ -130,7 +152,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"You entered a safe zone.",
 		UIWidgets.EditBox,
-		"Friendly enter message. Supports localization keys."
+		"Supports localization keys."
 	)]
 	protected string m_sFriendlyEnterMessage;
 
@@ -138,7 +160,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"SAFE ZONE",
 		UIWidgets.EditBox,
-		"Friendly exit title. Supports localization keys."
+		"Supports localization keys."
 	)]
 	protected string m_sFriendlyExitTitle;
 
@@ -146,19 +168,19 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"You left the safe zone.",
 		UIWidgets.EditBox,
-		"Friendly exit message. Supports localization keys."
+		"Supports localization keys."
 	)]
 	protected string m_sFriendlyExitMessage;
 
 
 	// =============================================================================================
-	// ENEMY INTRUSION
+	// ENEMY
 	// =============================================================================================
 
 	[Attribute(
 		"10",
 		UIWidgets.EditBox,
-		"Seconds an enemy may remain inside before being killed."
+		"Seconds an enemy can remain inside before being killed."
 	)]
 	protected int m_iEnemyKillDelaySeconds;
 
@@ -166,7 +188,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"WARNING - ENEMY SAFE ZONE",
 		UIWidgets.EditBox,
-		"Enemy warning title. Supports localization keys."
+		"Supports localization keys."
 	)]
 	protected string m_sEnemyWarningTitle;
 
@@ -174,7 +196,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"You are inside an enemy Safe Zone. Leave immediately. You will be killed in %1 seconds.",
 		UIWidgets.EditBox,
-		"Enemy warning. Supports localization keys. %1 = seconds remaining."
+		"Supports localization keys. %1 = remaining seconds."
 	)]
 	protected string m_sEnemyWarningMessage;
 
@@ -182,7 +204,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"ENEMY SAFE ZONE",
 		UIWidgets.EditBox,
-		"Enemy exit title. Supports localization keys."
+		"Supports localization keys."
 	)]
 	protected string m_sEnemyExitTitle;
 
@@ -190,7 +212,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"You left the enemy Safe Zone. Elimination cancelled.",
 		UIWidgets.EditBox,
-		"Enemy exit message. Supports localization keys."
+		"Supports localization keys."
 	)]
 	protected string m_sEnemyExitMessage;
 
@@ -202,7 +224,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"15",
 		UIWidgets.EditBox,
-		"Seconds without Safe Zone protection after firing. Set 0 to disable Combat Lock."
+		"Seconds without Safe Zone protection after firing. 0 disables Combat Lock."
 	)]
 	protected float m_fCombatLockSeconds;
 
@@ -210,7 +232,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"SAFE ZONE - COMBAT",
 		UIWidgets.EditBox,
-		"Combat Lock title. Supports localization keys."
+		"Supports localization keys."
 	)]
 	protected string m_sCombatLockTitle;
 
@@ -218,7 +240,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"You fired inside the Safe Zone. Your protection has been temporarily disabled.",
 		UIWidgets.EditBox,
-		"Combat Lock message. Supports localization keys."
+		"Supports localization keys."
 	)]
 	protected string m_sCombatLockMessage;
 
@@ -226,7 +248,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"SAFE ZONE",
 		UIWidgets.EditBox,
-		"Protection restored title. Supports localization keys."
+		"Supports localization keys."
 	)]
 	protected string m_sProtectionRestoredTitle;
 
@@ -234,7 +256,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"Your Safe Zone protection has been restored.",
 		UIWidgets.EditBox,
-		"Protection restored message. Supports localization keys."
+		"Supports localization keys."
 	)]
 	protected string m_sProtectionRestoredMessage;
 
@@ -246,15 +268,15 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"FRIENDLY FIRE BLOCKED",
 		UIWidgets.EditBox,
-		"Friendly fire warning title. Supports localization keys."
+		"Supports localization keys."
 	)]
 	protected string m_sFriendlyFireTitle;
 
 
 	[Attribute(
-		"You cannot damage allies inside the Safe Zone.",
+		"You cannot damage allies while both players are inside the Safe Zone.",
 		UIWidgets.EditBox,
-		"Friendly fire warning message. Supports localization keys."
+		"Supports localization keys."
 	)]
 	protected string m_sFriendlyFireMessage;
 
@@ -266,7 +288,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"4",
 		UIWidgets.EditBox,
-		"Normal UI message duration."
+		"Normal message duration."
 	)]
 	protected float m_fMessageDuration;
 
@@ -278,7 +300,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"1",
 		UIWidgets.CheckBox,
-		"Enable BPS debug logging."
+		"Enable BPS debug logs."
 	)]
 	protected bool m_bDebug;
 
@@ -291,11 +313,20 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		new array<ref BPS_CharacterState>();
 
 
+	// Vehicles currently detected by the native sphere trigger.
+	protected ref array<IEntity> m_aVehiclesInside =
+		new array<IEntity>();
+
+
+	// Reused occupant buffer.
+	protected ref array<IEntity> m_aOccupants =
+		new array<IEntity>();
+
+
 	// =============================================================================================
 	// INIT
 	// =============================================================================================
 
-	//------------------------------------------------------------------------------------------------
 	override void OnInit(IEntity owner)
 	{
 		super.OnInit(owner);
@@ -325,7 +356,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		);
 
 
-		// Client does not need to perform trigger queries.
+		// Server-side detection only.
 		if (
 			Replication.IsRunning() &&
 			!Replication.IsServer()
@@ -353,7 +384,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 
 		DebugLog(
 			string.Format(
-				"INIT | Faction=%1 | SphereRadius=%2",
+				"INIT | Faction=%1 | Radius=%2",
 				m_sProtectedFactionKey,
 				GetSphereRadius()
 			)
@@ -362,142 +393,271 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 
 
 	// =============================================================================================
-	// FILTER
+	// TRIGGER FILTER
 	//
-	// Character-only version.
+	// We now accept:
+	//
+	// 1. Characters
+	// 2. Vehicles which contain a SCR_BaseCompartmentManagerComponent
 	// =============================================================================================
 
-	//------------------------------------------------------------------------------------------------
 	override bool ScriptedEntityFilterForQuery(IEntity ent)
 	{
-		return ChimeraCharacter.Cast(ent) != null;
+		if (!ent)
+			return false;
+
+
+		if (ChimeraCharacter.Cast(ent))
+			return true;
+
+
+		return GetVehicleCompartmentManager(ent) != null;
 	}
 
 
 	// =============================================================================================
-	// ENTER
+	// TRIGGER ENTER
 	// =============================================================================================
 
-	//------------------------------------------------------------------------------------------------
 	override void OnActivate(IEntity ent)
 	{
 		super.OnActivate(ent);
-	
+
+
 		if (!ent)
 			return;
-	
-		ChimeraCharacter character = ChimeraCharacter.Cast(ent);
-	
-		if (!character)
-			return;
-	
-		BPS_CharacterState state = GetOrCreateState(character);
-	
-		state.m_bInside = true;
-	
-		DebugLog(
-			string.Format(
-				"ENTER | Entity=%1 | Faction=%2 | ProtectedFaction=%3",
-				character,
-				GetFactionKey(character),
-				m_sProtectedFactionKey
-			)
-		);
-	
-		// FRIENDLY
-		if (IsProtectedFaction(character))
+
+
+		// =========================================================================================
+		// CHARACTER DIRECTLY INSIDE
+		// =========================================================================================
+
+		ChimeraCharacter character =
+			ChimeraCharacter.Cast(ent);
+
+
+		if (character)
 		{
-			ResetIntruder(state);
-			InitializeWeaponTracking(state);
-	
-			if (m_bShowFriendlyEnterExitMessages)
-			{
-				ShowMessage(
-					character,
-					m_sFriendlyEnterTitle,
-					m_sFriendlyEnterMessage
-				);
-			}
-	
+			BPS_CharacterState state =
+				GetOrCreateState(character);
+
+
+			state.m_bDirectInside = true;
+
+
+			DebugLog(
+				string.Format(
+					"DIRECT ACTIVATE | Character=%1",
+					character
+				)
+			);
+
+
 			return;
 		}
-	
-		// ENEMY
-		StartIntruderCountdown(state);
+
+
+		// =========================================================================================
+		// VEHICLE INSIDE
+		// =========================================================================================
+
+		SCR_BaseCompartmentManagerComponent manager =
+			GetVehicleCompartmentManager(ent);
+
+
+		if (!manager)
+			return;
+
+
+		if (
+			m_aVehiclesInside.Find(ent) < 0
+		)
+		{
+			m_aVehiclesInside.Insert(ent);
+		}
+
+
+		DebugLog(
+			string.Format(
+				"VEHICLE ACTIVATE | Vehicle=%1 | Occupants=%2",
+				ent,
+				manager.GetOccupantCount()
+			)
+		);
 	}
 
 
 	// =============================================================================================
-	// EXIT
+	// TRIGGER EXIT
 	// =============================================================================================
 
-	//------------------------------------------------------------------------------------------------
 	override void OnDeactivate(IEntity ent)
 	{
 		super.OnDeactivate(ent);
-	
+
+
 		if (!ent)
 			return;
-	
-		BPS_CharacterState state = FindState(ent);
-	
-		if (!state)
+
+
+		// =========================================================================================
+		// CHARACTER DIRECTLY LEFT
+		// =========================================================================================
+
+		ChimeraCharacter character =
+			ChimeraCharacter.Cast(ent);
+
+
+		if (character)
+		{
+			BPS_CharacterState state =
+				FindState(character);
+
+
+			if (state)
+			{
+				state.m_bDirectInside = false;
+			}
+
+
+			DebugLog(
+				string.Format(
+					"DIRECT DEACTIVATE | Character=%1",
+					character
+				)
+			);
+
+
 			return;
-	
+		}
+
+
+		// =========================================================================================
+		// VEHICLE LEFT
+		// =========================================================================================
+
+		int vehicleIndex =
+			m_aVehiclesInside.Find(ent);
+
+
+		if (vehicleIndex >= 0)
+		{
+			m_aVehiclesInside.Remove(
+				vehicleIndex
+			);
+		}
+
+
 		DebugLog(
 			string.Format(
-				"EXIT | Entity=%1 | Intruder=%2",
-				ent,
-				IsIntruderActive(state)
+				"VEHICLE DEACTIVATE | Vehicle=%1",
+				ent
 			)
 		);
-	
-		state.m_bInside = false;
-	
-		ResetWeaponTracking(state);
-	
-		// ENEMY LEFT
-		if (IsIntruderActive(state))
-		{
-			ResetIntruder(state);
-	
-			ShowMessage(
-				ent,
-				m_sEnemyExitTitle,
-				m_sEnemyExitMessage
-			);
-	
-			if (!IsCombatLocked(state))
-				RemoveState(state);
-	
-			return;
-		}
-	
-		// FRIENDLY LEFT
-		if (
-			IsProtectedFaction(ent) &&
-			m_bShowFriendlyEnterExitMessages
-		)
-		{
-			ShowMessage(
-				ent,
-				m_sFriendlyExitTitle,
-				m_sFriendlyExitMessage
-			);
-		}
-	
-		if (!IsCombatLocked(state))
-			RemoveState(state);
 	}
 
 
 	// =============================================================================================
-	// MAIN SERVER LOOP
+	// MAIN LOOP
 	// =============================================================================================
 
-	//------------------------------------------------------------------------------------------------
 	protected void BPS_LogicTick()
 	{
+		// =========================================================================================
+		// STEP 1
+		//
+		// Reset vehicle-presence flag.
+		//
+		// It will be rebuilt from vehicles currently inside the trigger.
+		// =========================================================================================
+
+		foreach (
+			BPS_CharacterState state :
+			m_aStates
+		)
+		{
+			if (state)
+				state.m_bVehicleInside = false;
+		}
+
+
+		// =========================================================================================
+		// STEP 2
+		//
+		// Get every occupant of every vehicle currently inside.
+		// =========================================================================================
+
+		for (int v = m_aVehiclesInside.Count() - 1; v >= 0; v--)
+		{
+			IEntity vehicle =
+				m_aVehiclesInside[v];
+
+
+			if (!vehicle)
+			{
+				m_aVehiclesInside.Remove(v);
+
+				continue;
+			}
+
+
+			SCR_BaseCompartmentManagerComponent manager =
+				GetVehicleCompartmentManager(
+					vehicle
+				);
+
+
+			if (!manager)
+			{
+				m_aVehiclesInside.Remove(v);
+
+				continue;
+			}
+
+
+			m_aOccupants.Clear();
+
+
+			manager.GetOccupants(
+				m_aOccupants
+			);
+
+
+			foreach (
+				IEntity occupant :
+				m_aOccupants
+			)
+			{
+				ChimeraCharacter occupantCharacter =
+					ChimeraCharacter.Cast(
+						occupant
+					);
+
+
+				if (!occupantCharacter)
+					continue;
+
+
+				BPS_CharacterState occupantState =
+					GetOrCreateState(
+						occupantCharacter
+					);
+
+
+				occupantState.m_bVehicleInside =
+					true;
+			}
+		}
+
+
+		// =========================================================================================
+		// STEP 3
+		//
+		// Consolidate:
+		//
+		// directInside || vehicleInside
+		// =========================================================================================
+
 		for (int i = m_aStates.Count() - 1; i >= 0; i--)
 		{
 			BPS_CharacterState state =
@@ -524,53 +684,90 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 			}
 
 
+			bool isInside =
+				state.IsInside();
+
+
 			// =====================================================================================
-			// ENEMY COUNTDOWN
+			// ENTER TRANSITION
 			// =====================================================================================
 
-			if (IsIntruderActive(state))
+			if (
+				isInside &&
+				!state.m_bWasInside
+			)
 			{
-				ProcessIntruder(
+				state.m_bWasInside = true;
+
+
+				HandleCharacterEntered(
 					state
 				);
-
-				continue;
 			}
 
 
 			// =====================================================================================
-			// FRIENDLY WEAPON DETECTION
+			// EXIT TRANSITION
+			// =====================================================================================
+
+			else if (
+				!isInside &&
+				state.m_bWasInside
+			)
+			{
+				state.m_bWasInside = false;
+
+
+				HandleCharacterExited(
+					state
+				);
+			}
+
+
+			// =====================================================================================
+			// ENEMY
 			// =====================================================================================
 
 			if (
-				state.m_bInside &&
-				IsProtectedFaction(character) &&
-				m_fCombatLockSeconds > 0
+				isInside &&
+				IsIntruderActive(state)
 			)
 			{
-				if (HasFired(state))
+				ProcessIntruder(
+					state
+				);
+			}
+
+
+			// =====================================================================================
+			// FRIENDLY WEAPON / COMBAT LOCK
+			// =====================================================================================
+
+			else if (
+				isInside &&
+				IsProtectedFaction(character)
+			)
+			{
+				if (
+					m_fCombatLockSeconds > 0 &&
+					HasFired(state)
+				)
 				{
 					ApplyCombatLock(
 						state
 					);
 				}
-			}
 
 
-			// =====================================================================================
-			// COMBAT LOCK FINISHED
-			// =====================================================================================
-
-			if (
-				state.m_iCombatLockStartTime >= 0 &&
-				!IsCombatLocked(state)
-			)
-			{
-				state.m_iCombatLockStartTime = -1;
-
-
-				if (state.m_bInside)
+				if (
+					state.m_iCombatLockStartTime >= 0 &&
+					!IsCombatLocked(state)
+				)
 				{
+					state.m_iCombatLockStartTime =
+						-1;
+
+
 					ShowMessage(
 						character,
 						m_sProtectionRestoredTitle,
@@ -585,7 +782,8 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 			// =====================================================================================
 
 			if (
-				!state.m_bInside &&
+				!isInside &&
+				!IsIntruderActive(state) &&
 				!IsCombatLocked(state)
 			)
 			{
@@ -596,26 +794,172 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 
 
 	// =============================================================================================
-	// INTRUDER
+	// CHARACTER TRANSITIONS
 	// =============================================================================================
 
+	protected void HandleCharacterEntered(
+		BPS_CharacterState state
+	)
+	{
+		if (!state)
+			return;
+
+
+		IEntity character =
+			state.m_Character;
+
+
+		DebugLog(
+			string.Format(
+				"ENTER | Character=%1 | Faction=%2 | Direct=%3 | Vehicle=%4",
+				character,
+				GetFactionKey(character),
+				state.m_bDirectInside,
+				state.m_bVehicleInside
+			)
+		);
+
+
+		// =========================================================================================
+		// FRIENDLY
+		// =========================================================================================
+
+		if (IsProtectedFaction(character))
+		{
+			ResetIntruder(state);
+
+			InitializeWeaponTracking(state);
+
+
+			if (
+				m_bShowFriendlyEnterExitMessages
+			)
+			{
+				ShowMessage(
+					character,
+					m_sFriendlyEnterTitle,
+					m_sFriendlyEnterMessage
+				);
+			}
+
+
+			return;
+		}
+
+
+		// =========================================================================================
+		// ENEMY
+		// =========================================================================================
+
+		StartIntruderCountdown(
+			state
+		);
+	}
+
+
 	//------------------------------------------------------------------------------------------------
+	protected void HandleCharacterExited(
+		BPS_CharacterState state
+	)
+	{
+		if (!state)
+			return;
+
+
+		IEntity character =
+			state.m_Character;
+
+
+		DebugLog(
+			string.Format(
+				"EXIT | Character=%1 | Faction=%2",
+				character,
+				GetFactionKey(character)
+			)
+		);
+
+
+		ResetWeaponTracking(state);
+
+
+		// =========================================================================================
+		// ENEMY EXIT
+		// =========================================================================================
+
+		if (IsIntruderActive(state))
+		{
+			ResetIntruder(state);
+
+
+			ShowMessage(
+				character,
+				m_sEnemyExitTitle,
+				m_sEnemyExitMessage
+			);
+
+
+			return;
+		}
+
+
+		// =========================================================================================
+		// FRIENDLY EXIT
+		// =========================================================================================
+
+		if (
+			IsProtectedFaction(character) &&
+			m_bShowFriendlyEnterExitMessages
+		)
+		{
+			ShowMessage(
+				character,
+				m_sFriendlyExitTitle,
+				m_sFriendlyExitMessage
+			);
+		}
+	}
+
+
+	// =============================================================================================
+	// VEHICLE
+	// =============================================================================================
+
+	protected SCR_BaseCompartmentManagerComponent GetVehicleCompartmentManager(
+		IEntity ent
+	)
+	{
+		if (!ent)
+			return null;
+
+
+		return SCR_BaseCompartmentManagerComponent.Cast(
+			ent.FindComponent(
+				SCR_BaseCompartmentManagerComponent
+			)
+		);
+	}
+
+
+	// =============================================================================================
+	// ENEMY COUNTDOWN
+	// =============================================================================================
+
 	protected void StartIntruderCountdown(
 		BPS_CharacterState state
 	)
 	{
 		if (!state)
 			return;
-	
-	
+
+
 		state.m_iIntruderStartTime =
 			System.GetTickCount();
-	
-	
+
+
 		state.m_iLastIntruderSecond =
 			m_iEnemyKillDelaySeconds;
-	
-	
+
+
 		ShowMessageParam1(
 			state.m_Character,
 			m_sEnemyWarningTitle,
@@ -623,8 +967,8 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 			m_iEnemyKillDelaySeconds,
 			BPS_COUNTDOWN_HINT_DURATION
 		);
-	
-	
+
+
 		DebugLog(
 			string.Format(
 				"INTRUDER START | Entity=%1 | Seconds=%2",
@@ -642,100 +986,66 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	{
 		if (!state)
 			return;
-	
-		IEntity character = state.m_Character;
-	
+
+
+		IEntity character =
+			state.m_Character;
+
+
 		if (!character)
-		{
-			RemoveState(state);
 			return;
-		}
-	
-	
-		// =========================================================================
-		// PRESENCE
-		//
-		// Do NOT perform another geometry query here.
-		//
-		// OnActivate  -> m_bInside = true
-		// OnDeactivate -> m_bInside = false
-		// =========================================================================
-	
-		if (!state.m_bInside)
-		{
-			return;
-		}
-	
-	
-		// =========================================================================
-		// FACTION CHANGED
-		// =========================================================================
-	
+
+
+		// Faction changed while inside.
 		if (IsProtectedFaction(character))
 		{
-			DebugLog(
-				string.Format(
-					"INTRUDER BECAME FRIENDLY | Entity=%1",
-					character
-				)
-			);
-	
 			ResetIntruder(state);
-	
+
 			InitializeWeaponTracking(state);
-	
+
 			return;
 		}
-	
-	
-		// =========================================================================
-		// COUNTDOWN
-		// =========================================================================
-	
+
+
 		int elapsedMs =
 			System.GetTickCount(
 				state.m_iIntruderStartTime
 			);
-	
-	
+
+
 		int totalMs =
 			m_iEnemyKillDelaySeconds *
 			1000;
-	
-	
+
+
 		int remainingMs =
 			totalMs -
 			elapsedMs;
-	
-	
-		// =========================================================================
+
+
+		// =========================================================================================
 		// KILL
-		// =========================================================================
-	
+		// =========================================================================================
+
 		if (remainingMs <= 0)
 		{
-			DebugLog(
-				string.Format(
-					"INTRUDER COUNTDOWN FINISHED | Entity=%1",
-					character
-				)
+			KillIntruder(
+				state
 			);
-	
-			KillIntruder(state);
-	
+
 			return;
 		}
-	
-	
-		// =========================================================================
-		// UI COUNTDOWN
-		// =========================================================================
-	
+
+
+		// =========================================================================================
+		// COUNTDOWN
+		// =========================================================================================
+
 		int remainingSeconds =
 			(remainingMs + 999) /
 			1000;
-	
-	
+
+
 		if (
 			remainingSeconds ==
 			state.m_iLastIntruderSecond
@@ -743,27 +1053,18 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		{
 			return;
 		}
-	
-	
+
+
 		state.m_iLastIntruderSecond =
 			remainingSeconds;
-	
-	
+
+
 		ShowMessageParam1(
 			character,
 			m_sEnemyWarningTitle,
 			m_sEnemyWarningMessage,
 			remainingSeconds,
 			BPS_COUNTDOWN_HINT_DURATION
-		);
-	
-	
-		DebugLog(
-			string.Format(
-				"INTRUDER COUNTDOWN | Entity=%1 | Remaining=%2",
-				character,
-				remainingSeconds
-			)
 		);
 	}
 
@@ -775,111 +1076,76 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	{
 		if (!state)
 			return;
-	
-	
+
+
 		IEntity character =
 			state.m_Character;
-	
-	
-		if (!character)
+
+
+		// State, NOT position math, is the authority.
+		if (
+			!character ||
+			!state.IsInside()
+		)
 		{
-			RemoveState(state);
 			return;
 		}
-	
-	
-		// =========================================================================
-		// Only the trigger controls presence.
-		// =========================================================================
-	
-		if (!state.m_bInside)
-			return;
-	
-	
-		// Faction changed before execution.
-		if (IsProtectedFaction(character))
-		{
-			ResetIntruder(state);
-			return;
-		}
-	
-	
+
+
 		SCR_DamageManagerComponent damageManager =
 			SCR_DamageManagerComponent.GetDamageManager(
 				character
 			);
-	
-	
+
+
 		if (!damageManager)
-		{
-			DebugLog(
-				string.Format(
-					"KILL FAILED | No DamageManager | Entity=%1",
-					character
-				)
-			);
-	
 			return;
-		}
-	
-	
+
+
 		if (damageManager.IsDestroyed())
 		{
 			ResetIntruder(state);
-			RemoveState(state);
-	
+
 			return;
 		}
-	
-	
-		DebugLog(
-			string.Format(
-				"KILLING INTRUDER | Entity=%1 | Health=%2",
-				character,
-				damageManager.GetHealthScaled()
-			)
-		);
-	
-	
+
+
 		ref Instigator instigator =
 			Instigator.CreateInstigatorGM();
-	
-	
+
+
 		if (instigator)
 		{
 			damageManager.Kill(
 				instigator
 			);
 		}
-	
-	
-		// Fallback
+
+
 		if (!damageManager.IsDestroyed())
 		{
 			damageManager.SetHealthScaled(
 				0
 			);
 		}
-	
-	
+
+
 		DebugLog(
 			string.Format(
-				"KILL RESULT | Entity=%1 | Health=%2 | Destroyed=%3",
+				"KILL | Character=%1 | Health=%2 | Destroyed=%3",
 				character,
 				damageManager.GetHealthScaled(),
 				damageManager.IsDestroyed()
 			)
 		);
-	
-	
+
+
 		if (
 			damageManager.IsDestroyed() ||
 			damageManager.GetHealthScaled() <= 0
 		)
 		{
 			ResetIntruder(state);
-	
-			RemoveState(state);
 		}
 	}
 
@@ -889,11 +1155,10 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		BPS_CharacterState state
 	)
 	{
-		if (!state)
-			return false;
-
-
-		return state.m_iIntruderStartTime >= 0;
+		return (
+			state &&
+			state.m_iIntruderStartTime >= 0
+		);
 	}
 
 
@@ -919,17 +1184,17 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	// COMBAT LOCK
 	// =============================================================================================
 
-	//------------------------------------------------------------------------------------------------
 	protected void ApplyCombatLock(
 		BPS_CharacterState state
 	)
 	{
-		if (!state)
+		if (
+			!state ||
+			m_fCombatLockSeconds <= 0
+		)
+		{
 			return;
-
-
-		if (m_fCombatLockSeconds <= 0)
-			return;
+		}
 
 
 		bool alreadyLocked =
@@ -948,14 +1213,6 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 				m_sCombatLockMessage
 			);
 		}
-
-
-		DebugLog(
-			string.Format(
-				"COMBAT LOCK | Entity=%1",
-				state.m_Character
-			)
-		);
 	}
 
 
@@ -964,12 +1221,13 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		BPS_CharacterState state
 	)
 	{
-		if (!state)
+		if (
+			!state ||
+			state.m_iCombatLockStartTime < 0
+		)
+		{
 			return false;
-
-
-		if (state.m_iCombatLockStartTime < 0)
-			return false;
+		}
 
 
 		int durationMs =
@@ -991,7 +1249,6 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	// WEAPON TRACKING
 	// =============================================================================================
 
-	//------------------------------------------------------------------------------------------------
 	protected bool HasFired(
 		BPS_CharacterState state
 	)
@@ -1040,7 +1297,6 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 			muzzle.GetAmmoCount();
 
 
-		// Weapon or muzzle changed.
 		if (
 			state.m_Weapon != weapon ||
 			state.m_Muzzle != muzzle
@@ -1113,11 +1369,6 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	// DAMAGE
 	// =============================================================================================
 
-	//------------------------------------------------------------------------------------------------
-	// Called from BPS_DamageManager.c
-	//
-	// TRUE = completely block damage.
-	//------------------------------------------------------------------------------------------------
 	static bool BPS_ShouldBlockDamage(
 		IEntity victim,
 		notnull BaseDamageContext damageContext
@@ -1127,7 +1378,6 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 			return false;
 
 
-		// Healing must continue normally.
 		if (
 			damageContext.damageType ==
 				EDamageType.HEALING ||
@@ -1144,11 +1394,8 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 			s_aZones
 		)
 		{
-			if (!zone)
-				continue;
-
-
 			if (
+				zone &&
 				zone.ShouldBlockDamage(
 					victim,
 					damageContext
@@ -1170,14 +1417,34 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		notnull BaseDamageContext damageContext
 	)
 	{
-		// Character-only core.
 		if (!ChimeraCharacter.Cast(victim))
 			return false;
 
 
-		// Only our protected faction gets Safe Zone protection.
+		// Only protected faction gets protection.
 		if (!IsProtectedFaction(victim))
 			return false;
+
+
+		BPS_CharacterState victimState =
+			FindState(victim);
+
+
+		// =========================================================================================
+		// CRITICAL FIX
+		//
+		// No state or state outside = BPS does NOTHING.
+		//
+		// An ally outside the sphere takes normal damage.
+		// =========================================================================================
+
+		if (
+			!victimState ||
+			!victimState.IsInside()
+		)
+		{
+			return false;
+		}
 
 
 		IEntity attacker = null;
@@ -1193,8 +1460,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		// =========================================================================================
 		// FRIENDLY FIRE
 		//
-		// Always blocked inside the Safe Zone,
-		// EVEN when the victim is Combat Locked.
+		// Block only when BOTH are inside.
 		// =========================================================================================
 
 		if (
@@ -1203,42 +1469,81 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 			IsProtectedFaction(attacker)
 		)
 		{
-			ShowMessage(
-				attacker,
-				m_sFriendlyFireTitle,
-				m_sFriendlyFireMessage
-			);
+			BPS_CharacterState attackerState =
+				FindState(attacker);
 
 
-			return true;
+			if (
+				attackerState &&
+				attackerState.IsInside()
+			)
+			{
+				ShowFriendlyFireMessage(
+					attacker,
+					attackerState
+				);
+
+
+				return true;
+			}
 		}
 
 
 		// =========================================================================================
 		// COMBAT LOCK
 		//
-		// Friendly fire has already been handled above.
-		// During Combat Lock, enemy/environment damage is allowed.
+		// Friendly-fire blocking above remains active even during Combat Lock.
 		// =========================================================================================
 
-		BPS_CharacterState victimState =
-			FindState(victim);
+		if (IsCombatLocked(victimState))
+			return false;
 
 
+		// Normal Safe Zone protection.
+		return true;
+	}
+
+
+	// =============================================================================================
+	// FRIENDLY FIRE MESSAGE
+	// =============================================================================================
+
+	protected void ShowFriendlyFireMessage(
+		IEntity attacker,
+		BPS_CharacterState state
+	)
+	{
 		if (
-			victimState &&
-			IsCombatLocked(victimState)
+			!attacker ||
+			!state
 		)
 		{
-			return false;
+			return;
 		}
 
 
-		// =========================================================================================
-		// NORMAL SAFE ZONE PROTECTION
-		// =========================================================================================
+		if (
+			state.m_iFriendlyFireMessageTime >= 0 &&
+			System.GetTickCount(
+				state.m_iFriendlyFireMessageTime
+			)
+			<
+			BPS_FRIENDLY_FIRE_MESSAGE_COOLDOWN_MS
+		)
+		{
+			return;
+		}
 
-		return true;
+
+		state.m_iFriendlyFireMessageTime =
+			System.GetTickCount();
+
+
+		ShowMessage(
+			attacker,
+			m_sFriendlyFireTitle,
+			m_sFriendlyFireMessage
+		);
 	}
 
 
@@ -1246,7 +1551,6 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	// FACTION
 	// =============================================================================================
 
-	//------------------------------------------------------------------------------------------------
 	protected FactionKey GetFactionKey(
 		IEntity ent
 	)
@@ -1270,10 +1574,6 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 
 
 	//------------------------------------------------------------------------------------------------
-	// Intentionally exact FactionKey comparison.
-	//
-	// This keeps US / USSR behaviour deterministic while we stabilize BPS.
-	//------------------------------------------------------------------------------------------------
 	protected bool IsProtectedFaction(
 		IEntity ent
 	)
@@ -1289,7 +1589,6 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	// STATE
 	// =============================================================================================
 
-	//------------------------------------------------------------------------------------------------
 	protected BPS_CharacterState GetOrCreateState(
 		IEntity character
 	)
@@ -1346,39 +1645,14 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	}
 
 
-	//------------------------------------------------------------------------------------------------
-	protected void RemoveState(
-		BPS_CharacterState state
-	)
-	{
-		if (!state)
-			return;
-
-
-		int index =
-			m_aStates.Find(
-				state
-			);
-
-
-		if (index >= 0)
-			m_aStates.Remove(index);
-	}
-
-
 	// =============================================================================================
 	// UI
 	// =============================================================================================
 
-	//------------------------------------------------------------------------------------------------
 	protected SCR_PlayerController GetController(
 		IEntity character
 	)
 	{
-		if (!character)
-			return null;
-
-
 		PlayerManager playerManager =
 			GetGame().GetPlayerManager();
 
@@ -1443,10 +1717,6 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		float duration
 	)
 	{
-		if (message == "")
-			return;
-
-
 		SCR_PlayerController controller =
 			GetController(
 				character
@@ -1470,7 +1740,6 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	// DEBUG
 	// =============================================================================================
 
-	//------------------------------------------------------------------------------------------------
 	protected void DebugLog(
 		string message
 	)
@@ -1490,7 +1759,6 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	// CLEANUP
 	// =============================================================================================
 
-	//------------------------------------------------------------------------------------------------
 	void ~BPS_SafeZoneTriggerEntity()
 	{
 		if (GetGame())
@@ -1508,13 +1776,17 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		}
 
 
-		int zoneIndex =
+		int index =
 			s_aZones.Find(
 				this
 			);
 
 
-		if (zoneIndex >= 0)
-			s_aZones.Remove(zoneIndex);
+		if (index >= 0)
+		{
+			s_aZones.Remove(
+				index
+			);
+		}
 	}
 }

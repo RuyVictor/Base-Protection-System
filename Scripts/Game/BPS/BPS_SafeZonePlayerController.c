@@ -1,15 +1,5 @@
-//------------------------------------------------------------------------------------------------
-// BPS - Base Protection System
-//
-// Client-side message RPC.
-//------------------------------------------------------------------------------------------------
-
 modded class SCR_PlayerController
 {
-	// =============================================================================================
-	// NORMAL MESSAGE
-	// =============================================================================================
-
 	//------------------------------------------------------------------------------------------------
 	void BPS_ShowMessage(
 		string title,
@@ -50,15 +40,11 @@ modded class SCR_PlayerController
 	)
 	{
 		string localizedTitle =
-			WidgetManager.Translate(
-				title
-			);
+			WidgetManager.Translate(title);
 
 
 		string localizedMessage =
-			WidgetManager.Translate(
-				message
-			);
+			WidgetManager.Translate(message);
 
 
 		SCR_HintManagerComponent.ShowCustomHint(
@@ -69,12 +55,6 @@ modded class SCR_PlayerController
 		);
 	}
 
-
-	// =============================================================================================
-	// PARAMETERIZED MESSAGE
-	//
-	// %1
-	// =============================================================================================
 
 	//------------------------------------------------------------------------------------------------
 	void BPS_ShowMessageParam1(
@@ -133,7 +113,6 @@ modded class SCR_PlayerController
 			);
 
 
-		// Countdown messages should replace the previous hint.
 		SCR_HintManagerComponent.HideHint();
 
 
