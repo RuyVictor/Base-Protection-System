@@ -1,0 +1,10 @@
+BPS_SafeZoneTriggerEntity {
+ coords 144.067 1 121.17
+ TriggerShapeType Sphere
+ SphereRadius 10
+ BoxMins -5 -5 -5
+ BoxMaxs 5 5 5
+ "Polyline Height" 20
+ DrawShape 1
+ TriggerActivationType "All changes"
+}

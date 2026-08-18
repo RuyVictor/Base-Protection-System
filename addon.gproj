@@ -1,0 +1,8 @@
+GameProject {
+ ID "BaseProtectionSystem"
+ GUID "6A2453EFB2727A93"
+ TITLE "Base Protection System"
+ Dependencies {
+  "58D0FB3206B6F859"
+ }
+}
