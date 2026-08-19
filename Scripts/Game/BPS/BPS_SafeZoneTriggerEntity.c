@@ -1823,6 +1823,15 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		notnull BaseDamageContext damageContext
 	)
 	{
+		// Never interfere with healing / regeneration.
+		if (
+			damageContext.damageType == EDamageType.HEALING ||
+			damageContext.damageType == EDamageType.REGENERATION
+		)
+		{
+			return false;
+		}
+
 		foreach (
 			BPS_SafeZoneTriggerEntity zone :
 			s_aZones
@@ -1840,7 +1849,6 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 			}
 		}
 
-
 		return false;
 	}
 
@@ -1851,24 +1859,44 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		notnull BaseDamageContext damageContext
 	)
 	{
-		if (!ChimeraCharacter.Cast(victim))
+		if (!victim)
 			return false;
 
+		if (ChimeraCharacter.Cast(victim))
+		{
+			return ShouldBlockCharacterDamage(
+				victim,
+				damageContext
+			);
+		}
 
+		// Any entity tracked by the BPS as a compartment vehicle can use
+		// vehicle friendly-fire protection.
+		if (GetCompartmentManager(victim))
+		{
+			return ShouldBlockVehicleDamage(
+				victim,
+				damageContext
+			);
+		}
+
+		return false;
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	protected bool ShouldBlockCharacterDamage(
+		IEntity victim,
+		notnull BaseDamageContext damageContext
+	)
+	{
 		if (!IsProtectedFaction(victim))
 			return false;
 
-
 		BPS_CharacterState victimState =
-			FindCharacterState(
-				victim
-			);
+			FindCharacterState(victim);
 
-
-		// IMPORTANT:
-		//
-		// Friendly outside the Safe Zone:
-		// no state inside -> NORMAL DAMAGE.
+		// Friendly outside the Safe Zone takes normal damage.
 		if (
 			!victimState ||
 			!victimState.IsInside()
@@ -1877,20 +1905,10 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 			return false;
 		}
 
+		IEntity attacker =
+			GetDamageInstigatorEntity(damageContext);
 
-		IEntity attacker = null;
-
-
-		if (damageContext.instigator)
-		{
-			attacker =
-				damageContext.instigator.GetInstigatorEntity();
-		}
-
-
-		// Friendly fire is blocked because the VICTIM is inside.
-		//
-		// If victim is outside this code was already exited above.
+		// Friendly fire against a protected player inside the Safe Zone.
 		if (
 			m_FriendlyFireConfig.IsEnabled() &&
 			attacker &&
@@ -1899,10 +1917,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		)
 		{
 			BPS_CharacterState attackerState =
-				FindCharacterState(
-					attacker
-				);
-
+				FindCharacterState(attacker);
 
 			if (
 				attackerState &&
@@ -1915,19 +1930,90 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 				);
 			}
 
-
 			return true;
 		}
 
-
 		// Combat Lock removes normal protection.
-		//
-		// Friendly fire was processed BEFORE this.
+		// Friendly fire was handled before this check.
 		if (IsCombatLocked(victimState))
 			return false;
 
+		return true;
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	protected bool ShouldBlockVehicleDamage(
+		IEntity vehicle,
+		notnull BaseDamageContext damageContext
+	)
+	{
+		if (!m_FriendlyFireConfig.IsEnabled())
+			return false;
+
+		// CRITICAL: vehicles outside this specific Safe Zone are untouched.
+		if (m_aVehiclesInside.Find(vehicle) < 0)
+			return false;
+
+		// Only vehicles belonging to the Safe Zone faction are protected
+		// from friendly fire.
+		if (!IsProtectedFaction(vehicle))
+			return false;
+
+		IEntity attacker =
+			GetDamageInstigatorEntity(damageContext);
+
+		if (!attacker || attacker == vehicle)
+			return false;
+
+		// Enemy damage is ALWAYS allowed against vehicles. This prevents
+		// tanks from becoming invulnerable combat platforms inside a base.
+		if (!IsProtectedFaction(attacker))
+			return false;
+
+		// If the instigator is a player character currently tracked in the
+		// Safe Zone, show the same friendly-fire warning used for characters.
+		ChimeraCharacter attackerCharacter =
+			ChimeraCharacter.Cast(attacker);
+
+		if (attackerCharacter)
+		{
+			BPS_CharacterState attackerState =
+				FindCharacterState(attackerCharacter);
+
+			if (
+				attackerState &&
+				attackerState.IsInside()
+			)
+			{
+				ShowFriendlyFireMessage(
+					attackerCharacter,
+					attackerState
+				);
+			}
+		}
+
+		DebugLog(
+			string.Format(
+				"VEHICLE FRIENDLY FIRE BLOCKED | Vehicle=%1 | Attacker=%2",
+				vehicle,
+				attacker
+			)
+		);
 
 		return true;
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	protected IEntity GetDamageInstigatorEntity(
+		notnull BaseDamageContext damageContext
+	)
+	{
+		if (!damageContext.instigator)
+			return null;
+
+		return damageContext.instigator.GetInstigatorEntity();
 	}
 
 
@@ -2014,9 +2100,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	)
 	{
 		Faction faction =
-			SCR_Faction.GetEntityFaction(
-				ent
-			);
+			GetEntityFactionForBPS(ent);
 
 
 		if (!faction)
@@ -2028,32 +2112,60 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 
 
 	//------------------------------------------------------------------------------------------------
+	protected Faction GetEntityFactionForBPS(
+		IEntity ent
+	)
+	{
+		if (!ent)
+			return null;
+
+		// Works for characters and for entities exposed through SCR_Faction.
+		Faction faction =
+			SCR_Faction.GetEntityFaction(ent);
+
+		if (faction)
+			return faction;
+
+		// Vehicle-specific / generic faction affiliation fallback.
+		FactionAffiliationComponent affiliation =
+			FactionAffiliationComponent.Cast(
+				ent.FindComponent(
+					FactionAffiliationComponent
+				)
+			);
+
+		if (!affiliation)
+			return null;
+
+		faction = affiliation.GetAffiliatedFaction();
+
+		if (faction)
+			return faction;
+
+		return affiliation.GetDefaultAffiliatedFaction();
+	}
+
+
+	//------------------------------------------------------------------------------------------------
 	protected bool IsProtectedFaction(
 		IEntity ent
 	)
 	{
 		if (!ent)
 			return false;
-	
-	
+
 		Faction protectedFaction =
 			GetProtectedFaction();
-	
-	
+
 		if (!protectedFaction)
 			return false;
-	
-	
+
 		Faction entityFaction =
-			SCR_Faction.GetEntityFaction(
-				ent
-			);
-	
-	
+			GetEntityFactionForBPS(ent);
+
 		if (!entityFaction)
 			return false;
-	
-	
+
 		return (
 			entityFaction.GetFactionKey() ==
 			protectedFaction.GetFactionKey()
