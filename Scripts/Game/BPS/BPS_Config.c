@@ -4,32 +4,6 @@
 
 
 // ================================================================================================
-// FACTION
-// ================================================================================================
-
-[BaseContainerProps(configRoot: true)]
-class BPS_FactionConfig
-{
-	[Attribute(
-		"US",
-		UIWidgets.EditBox,
-		"Faction protected by this Safe Zone. Vanilla: US or USSR."
-	)]
-	protected FactionKey m_sProtectedFactionKey = "US";
-
-
-	FactionKey GetProtectedFactionKey()
-	{
-		// Convenience alias.
-		if (m_sProtectedFactionKey == "URSS")
-			return "USSR";
-
-		return m_sProtectedFactionKey;
-	}
-}
-
-
-// ================================================================================================
 // FRIENDLY MESSAGES
 // ================================================================================================
 

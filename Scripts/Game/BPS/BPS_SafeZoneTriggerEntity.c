@@ -122,15 +122,6 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	[Attribute(
 		"",
 		UIWidgets.Object,
-		"Faction configuration."
-	)]
-	protected ref BPS_FactionConfig m_FactionConfig =
-		new BPS_FactionConfig();
-
-
-	[Attribute(
-		"",
-		UIWidgets.Object,
 		"Friendly enter/exit UI."
 	)]
 	protected ref BPS_FriendlyMessagesConfig m_FriendlyMessages =
@@ -162,6 +153,17 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	)]
 	protected ref BPS_FriendlyFireConfig m_FriendlyFireConfig =
 		new BPS_FriendlyFireConfig();
+	
+	
+	// =============================================================================================
+	// CAMPAIGN BASE
+	// =============================================================================================
+	
+	protected SCR_CampaignMilitaryBaseComponent m_CampaignBase;
+	
+	protected FactionKey m_sLastBaseFactionKey;
+	
+	protected bool m_bBPSInitialized;
 
 
 	// =============================================================================================
@@ -215,45 +217,44 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	override void OnInit(IEntity owner)
 	{
 		super.OnInit(owner);
-
-
+	
 		EnsureConfig();
-
-
+	
 		SetUpdateRate(
 			BPS_TRIGGER_UPDATE_RATE
 		);
-
-
+	
+		// Client não executa a lógica da Safe Zone.
 		if (
 			Replication.IsRunning() &&
 			!Replication.IsServer()
 		)
 		{
 			EnablePeriodicQueries(false);
-
+	
 			return;
 		}
-
-
-		EnablePeriodicQueries(true);
-
-
-		if (s_aZones.Find(this) < 0)
-			s_aZones.Insert(this);
-
-
+	
+		// ---------------------------------------------------------------------
+		// IMPORTANT
+		//
+		// Conflict ainda pode não ter escolhido os HQs neste momento.
+		// Portanto o trigger começa desligado.
+		// ---------------------------------------------------------------------
+	
+		EnablePeriodicQueries(false);
+	
+	
 		GetGame().GetCallqueue().CallLater(
-			BPS_LogicTick,
-			BPS_LOGIC_INTERVAL_MS,
+			BPS_TryInitialize,
+			500,
 			true
 		);
-
-
+	
+	
 		DebugLog(
 			string.Format(
-				"INIT | Faction=%1 | Radius=%2",
-				GetProtectedFactionKey(),
+				"WAITING FOR CAMPAIGN BASE | Radius=%1",
 				GetSphereRadius()
 			)
 		);
@@ -263,10 +264,6 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	//------------------------------------------------------------------------------------------------
 	protected void EnsureConfig()
 	{
-		if (!m_FactionConfig)
-			m_FactionConfig = new BPS_FactionConfig();
-
-
 		if (!m_FriendlyMessages)
 			m_FriendlyMessages = new BPS_FriendlyMessagesConfig();
 
@@ -403,6 +400,8 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 
 	protected void BPS_LogicTick()
 	{
+		BPS_CheckBaseFaction();
+		
 		// Reset source provided by vehicles.
 		foreach (
 			BPS_CharacterState state :
@@ -435,6 +434,295 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		CleanupTurretStates();
 
 		ProcessCharacters();
+	}
+	
+	//------------------------------------------------------------------------------------------------
+	protected void BPS_CheckBaseFaction()
+	{
+		if (!m_CampaignBase)
+			return;
+	
+	
+		Faction faction =
+			m_CampaignBase.GetFaction();
+	
+	
+		if (!faction)
+			return;
+	
+	
+		FactionKey currentFactionKey =
+			faction.GetFactionKey();
+	
+	
+		if (
+			currentFactionKey ==
+			m_sLastBaseFactionKey
+		)
+		{
+			return;
+		}
+	
+	
+		FactionKey previousFactionKey =
+			m_sLastBaseFactionKey;
+	
+	
+		m_sLastBaseFactionKey =
+			currentFactionKey;
+	
+	
+		PrintFormat(
+			"[BPS] BASE FACTION CHANGED | Base=%1 | %2 -> %3",
+			m_CampaignBase.GetBaseName(),
+			previousFactionKey,
+			currentFactionKey
+		);
+	
+	
+		// =============================================================================================
+		// RE-EVALUATE EVERY PLAYER CURRENTLY INSIDE
+		//
+		// Somebody who was friendly may now be enemy and vice versa.
+		// =============================================================================================
+	
+		foreach (
+			BPS_CharacterState state :
+			m_aStates
+		)
+		{
+			if (!state)
+				continue;
+	
+	
+			if (!state.IsInside())
+				continue;
+	
+	
+			ResetIntruder(
+				state
+			);
+	
+	
+			state.m_iCombatLockStartTime =
+				-1;
+	
+	
+			// Force normal enter classification again next processing cycle.
+			state.m_bWasInside =
+				false;
+		}
+	}
+	
+	//------------------------------------------------------------------------------------------------
+	protected void BPS_TryInitialize()
+	{
+		if (m_bBPSInitialized)
+			return;
+	
+	
+		// =============================================================================================
+		// GET CAMPAIGN
+		// =============================================================================================
+	
+		SCR_GameModeCampaign campaign =
+			SCR_GameModeCampaign.GetInstance();
+	
+	
+		if (!campaign)
+		{
+			DebugLog(
+				"Waiting for SCR_GameModeCampaign..."
+			);
+	
+			return;
+		}
+	
+	
+		// =============================================================================================
+		// GET BASE MANAGER
+		// =============================================================================================
+	
+		SCR_CampaignMilitaryBaseManager baseManager =
+			campaign.GetBaseManager();
+	
+	
+		if (!baseManager)
+		{
+			DebugLog(
+				"Waiting for Campaign Base Manager..."
+			);
+	
+			return;
+		}
+	
+	
+		// =============================================================================================
+		// WAIT UNTIL RANDOM HQ SELECTION IS FINISHED
+		// =============================================================================================
+	
+		if (!baseManager.IsBasesInitDone())
+		{
+			return;
+		}
+	
+	
+		// =============================================================================================
+		// FIND BASE ASSOCIATED WITH THIS SAFE ZONE
+		// =============================================================================================
+	
+		m_CampaignBase =
+			baseManager.FindClosestBase(
+				GetOrigin()
+			);
+	
+	
+		if (!m_CampaignBase)
+		{
+			Print(
+				"[BPS] Could not find Campaign base near Safe Zone.",
+				LogLevel.ERROR
+			);
+	
+			StopInitializationTimer();
+	
+			return;
+		}
+	
+	
+		DebugLog(
+			string.Format(
+				"BASE FOUND | Name=%1 | HQ=%2",
+				m_CampaignBase.GetBaseName(),
+				m_CampaignBase.IsHQ()
+			)
+		);
+	
+	
+		// =============================================================================================
+		// THIS BASE WAS NOT SELECTED AS AN HQ
+		// =============================================================================================
+	
+		if (!m_CampaignBase.IsHQ())
+		{
+			DebugLog(
+				string.Format(
+					"BPS DISABLED | Base '%1' was not selected as HQ.",
+					m_CampaignBase.GetBaseName()
+				)
+			);
+	
+	
+			EnablePeriodicQueries(false);
+	
+			StopInitializationTimer();
+	
+			m_bBPSInitialized =
+				true;
+	
+			return;
+		}
+	
+	
+		// =============================================================================================
+		// GET OWNER
+		// =============================================================================================
+	
+		Faction faction =
+			m_CampaignBase.GetFaction();
+	
+	
+		if (!faction)
+		{
+			// Base initialization may have finished but faction assignment may
+			// still be completing this frame.
+			DebugLog(
+				"HQ found but faction is not assigned yet."
+			);
+	
+			return;
+		}
+	
+	
+		m_sLastBaseFactionKey =
+			faction.GetFactionKey();
+	
+	
+		// =============================================================================================
+		// ACTIVATE BPS
+		// =============================================================================================
+	
+		m_bBPSInitialized =
+			true;
+	
+	
+		StopInitializationTimer();
+	
+	
+		if (s_aZones.Find(this) < 0)
+		{
+			s_aZones.Insert(
+				this
+			);
+		}
+	
+	
+		EnablePeriodicQueries(
+			true
+		);
+	
+	
+		GetGame().GetCallqueue().CallLater(
+			BPS_LogicTick,
+			BPS_LOGIC_INTERVAL_MS,
+			true
+		);
+	
+	
+		PrintFormat(
+			"[BPS] ACTIVATED | Base=%1 | Faction=%2 | Radius=%3",
+			m_CampaignBase.GetBaseName(),
+			m_sLastBaseFactionKey,
+			GetSphereRadius()
+		);
+	}
+	
+	//------------------------------------------------------------------------------------------------
+	protected void StopInitializationTimer()
+	{
+		if (!GetGame())
+			return;
+	
+	
+		ScriptCallQueue queue =
+			GetGame().GetCallqueue();
+	
+	
+		if (!queue)
+			return;
+	
+	
+		queue.Remove(
+			BPS_TryInitialize
+		);
+	}
+	
+	//------------------------------------------------------------------------------------------------
+	protected Faction GetProtectedFaction()
+	{
+		if (!m_bBPSInitialized)
+			return null;
+	
+	
+		if (!m_CampaignBase)
+			return null;
+	
+	
+		if (!m_CampaignBase.IsHQ())
+			return null;
+	
+	
+		return m_CampaignBase.GetFaction();
 	}
 
 
@@ -1614,7 +1902,15 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 
 	protected FactionKey GetProtectedFactionKey()
 	{
-		return m_FactionConfig.GetProtectedFactionKey();
+		Faction faction =
+			GetProtectedFaction();
+	
+	
+		if (!faction)
+			return "";
+	
+	
+		return faction.GetFactionKey();
 	}
 
 
@@ -1636,13 +1932,36 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	}
 
 
+	//------------------------------------------------------------------------------------------------
 	protected bool IsProtectedFaction(
 		IEntity ent
 	)
 	{
+		if (!ent)
+			return false;
+	
+	
+		Faction protectedFaction =
+			GetProtectedFaction();
+	
+	
+		if (!protectedFaction)
+			return false;
+	
+	
+		Faction entityFaction =
+			SCR_Faction.GetEntityFaction(
+				ent
+			);
+	
+	
+		if (!entityFaction)
+			return false;
+	
+	
 		return (
-			GetFactionKey(ent) ==
-			GetProtectedFactionKey()
+			entityFaction.GetFactionKey() ==
+			protectedFaction.GetFactionKey()
 		);
 	}
 
