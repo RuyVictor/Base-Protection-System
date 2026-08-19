@@ -7,6 +7,14 @@ BPS_SafeZoneTriggerEntity {
  "Polyline Height" 20
  DrawShape 1
  TriggerActivationType "All changes"
+ m_FactionConfig BPS_FactionConfig "{6A257DA74CF8E4F5}" {
+ }
+ m_FriendlyMessages BPS_FriendlyMessagesConfig "{6A257DA74CB9E218}" {
+ }
  m_IntruderConfig BPS_IntruderConfig "{6A257DA4F0E86FAF}" {
+ }
+ m_CombatConfig BPS_CombatConfig "{6A257DA4BB41FEEF}" {
+ }
+ m_FriendlyFireConfig BPS_FriendlyFireConfig "{6A257DA4B90AC1D3}" {
  }
 }

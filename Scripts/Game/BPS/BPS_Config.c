@@ -7,7 +7,7 @@
 // FACTION
 // ================================================================================================
 
-[BaseContainerProps()]
+[BaseContainerProps(configRoot: true)]
 class BPS_FactionConfig
 {
 	[Attribute(
@@ -33,7 +33,7 @@ class BPS_FactionConfig
 // FRIENDLY MESSAGES
 // ================================================================================================
 
-[BaseContainerProps()]
+[BaseContainerProps(configRoot: true)]
 class BPS_FriendlyMessagesConfig
 {
 	[Attribute(
@@ -125,7 +125,7 @@ class BPS_FriendlyMessagesConfig
 // ENEMY INTRUSION
 // ================================================================================================
 
-[BaseContainerProps()]
+[BaseContainerProps(configRoot: true)]
 class BPS_IntruderConfig
 {
 	[Attribute(
@@ -236,7 +236,7 @@ class BPS_IntruderConfig
 // COMBAT LOCK
 // ================================================================================================
 
-[BaseContainerProps()]
+[BaseContainerProps(configRoot: true)]
 class BPS_CombatConfig
 {
 	[Attribute(
@@ -333,7 +333,7 @@ class BPS_CombatConfig
 // FRIENDLY FIRE
 // ================================================================================================
 
-[BaseContainerProps()]
+[BaseContainerProps(configRoot: true)]
 class BPS_FriendlyFireConfig
 {
 	[Attribute(
