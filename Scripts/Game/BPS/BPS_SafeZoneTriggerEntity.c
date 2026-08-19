@@ -124,8 +124,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		UIWidgets.Object,
 		"Friendly enter/exit UI."
 	)]
-	protected ref BPS_FriendlyMessagesConfig m_FriendlyMessages =
-		new BPS_FriendlyMessagesConfig();
+	ref BPS_FriendlyMessagesConfig m_FriendlyMessages;
 
 
 	[Attribute(
@@ -133,8 +132,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		UIWidgets.Object,
 		"Enemy intrusion configuration."
 	)]
-	protected ref BPS_IntruderConfig m_IntruderConfig =
-		new BPS_IntruderConfig();
+	ref BPS_IntruderConfig m_IntruderConfig;
 
 
 	[Attribute(
@@ -142,8 +140,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		UIWidgets.Object,
 		"Combat Lock configuration."
 	)]
-	protected ref BPS_CombatConfig m_CombatConfig =
-		new BPS_CombatConfig();
+	ref BPS_CombatConfig m_CombatConfig;
 
 
 	[Attribute(
@@ -151,8 +148,7 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		UIWidgets.Object,
 		"Friendly fire configuration."
 	)]
-	protected ref BPS_FriendlyFireConfig m_FriendlyFireConfig =
-		new BPS_FriendlyFireConfig();
+	ref BPS_FriendlyFireConfig m_FriendlyFireConfig;
 	
 	
 	// =============================================================================================

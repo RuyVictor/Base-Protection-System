@@ -7,8 +7,6 @@ BPS_SafeZoneTriggerEntity {
  "Polyline Height" 20
  DrawShape 1
  TriggerActivationType "All changes"
- m_FactionConfig BPS_FactionConfig "{6A257DA74CF8E4F5}" {
- }
  m_FriendlyMessages BPS_FriendlyMessagesConfig "{6A257DA74CB9E218}" {
  }
  m_IntruderConfig BPS_IntruderConfig "{6A257DA4F0E86FAF}" {
@@ -17,4 +15,7 @@ BPS_SafeZoneTriggerEntity {
  }
  m_FriendlyFireConfig BPS_FriendlyFireConfig "{6A257DA4B90AC1D3}" {
  }
+}
+GenericEntity : "{164B0489980ECF0F}Prefabs/Compositions/Locations/Arland/Base_MilitaryBase_USSR_01.et" {
+ coords 150.177 1 153.062
 }

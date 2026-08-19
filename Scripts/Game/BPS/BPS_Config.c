@@ -15,7 +15,7 @@ class BPS_FriendlyMessagesConfig
 		UIWidgets.CheckBox,
 		"Show messages when friendly players enter or leave."
 	)]
-	protected bool m_bEnabled = true;
+	bool m_bEnabled;
 
 
 	[Attribute(
@@ -23,7 +23,7 @@ class BPS_FriendlyMessagesConfig
 		UIWidgets.EditBox,
 		"Message duration."
 	)]
-	protected float m_fDuration = 4.0;
+	float m_fDuration;
 
 
 	[Attribute(
@@ -31,7 +31,7 @@ class BPS_FriendlyMessagesConfig
 		UIWidgets.EditBox,
 		"Supports localization keys."
 	)]
-	protected string m_sEnterTitle = "SAFE ZONE";
+	string m_sEnterTitle;
 
 
 	[Attribute(
@@ -39,7 +39,7 @@ class BPS_FriendlyMessagesConfig
 		UIWidgets.EditBox,
 		"Supports localization keys."
 	)]
-	protected string m_sEnterMessage = "You entered a safe zone.";
+	string m_sEnterMessage;
 
 
 	[Attribute(
@@ -47,7 +47,7 @@ class BPS_FriendlyMessagesConfig
 		UIWidgets.EditBox,
 		"Supports localization keys."
 	)]
-	protected string m_sExitTitle = "SAFE ZONE";
+	string m_sExitTitle;
 
 
 	[Attribute(
@@ -55,7 +55,7 @@ class BPS_FriendlyMessagesConfig
 		UIWidgets.EditBox,
 		"Supports localization keys."
 	)]
-	protected string m_sExitMessage = "You left the safe zone.";
+	string m_sExitMessage;
 
 
 	bool IsEnabled()
@@ -107,7 +107,7 @@ class BPS_IntruderConfig
 		UIWidgets.EditBox,
 		"Seconds an enemy can remain inside before being killed."
 	)]
-	protected int m_iKillDelaySeconds = 10;
+	int m_iKillDelaySeconds;
 
 
 	[Attribute(
@@ -115,7 +115,7 @@ class BPS_IntruderConfig
 		UIWidgets.EditBox,
 		"Countdown message duration."
 	)]
-	protected float m_fCountdownMessageDuration = 1.1;
+	float m_fCountdownMessageDuration;
 
 
 	[Attribute(
@@ -123,7 +123,7 @@ class BPS_IntruderConfig
 		UIWidgets.EditBox,
 		"Exit message duration."
 	)]
-	protected float m_fExitMessageDuration = 4.0;
+	float m_fExitMessageDuration;
 
 
 	[Attribute(
@@ -131,7 +131,7 @@ class BPS_IntruderConfig
 		UIWidgets.EditBox,
 		"Supports localization keys."
 	)]
-	protected string m_sWarningTitle = "WARNING - ENEMY SAFE ZONE";
+	string m_sWarningTitle;
 
 
 	[Attribute(
@@ -139,8 +139,7 @@ class BPS_IntruderConfig
 		UIWidgets.EditBox,
 		"Supports localization keys. %1 = remaining seconds."
 	)]
-	protected string m_sWarningMessage =
-		"You are inside an enemy Safe Zone. Leave immediately. You will be killed in %1 seconds.";
+	string m_sWarningMessage;
 
 
 	[Attribute(
@@ -148,7 +147,7 @@ class BPS_IntruderConfig
 		UIWidgets.EditBox,
 		"Supports localization keys."
 	)]
-	protected string m_sExitTitle = "ENEMY SAFE ZONE";
+	string m_sExitTitle;
 
 
 	[Attribute(
@@ -156,8 +155,7 @@ class BPS_IntruderConfig
 		UIWidgets.EditBox,
 		"Supports localization keys."
 	)]
-	protected string m_sExitMessage =
-		"You left the enemy Safe Zone. Elimination cancelled.";
+	string m_sExitMessage;
 
 
 	int GetKillDelaySeconds()
@@ -218,7 +216,7 @@ class BPS_CombatConfig
 		UIWidgets.EditBox,
 		"Combat Lock duration. 0 disables Combat Lock."
 	)]
-	protected float m_fDuration = 15.0;
+	float m_fDuration;
 
 
 	[Attribute(
@@ -226,7 +224,7 @@ class BPS_CombatConfig
 		UIWidgets.EditBox,
 		"Combat messages duration."
 	)]
-	protected float m_fMessageDuration = 4.0;
+	float m_fMessageDuration;
 
 
 	[Attribute(
@@ -234,7 +232,7 @@ class BPS_CombatConfig
 		UIWidgets.EditBox,
 		"Supports localization keys."
 	)]
-	protected string m_sLockTitle = "SAFE ZONE - COMBAT";
+	string m_sLockTitle;
 
 
 	[Attribute(
@@ -242,8 +240,7 @@ class BPS_CombatConfig
 		UIWidgets.EditBox,
 		"Supports localization keys."
 	)]
-	protected string m_sLockMessage =
-		"You fired inside the Safe Zone. Your protection has been temporarily disabled.";
+	string m_sLockMessage;
 
 
 	[Attribute(
@@ -251,7 +248,7 @@ class BPS_CombatConfig
 		UIWidgets.EditBox,
 		"Supports localization keys."
 	)]
-	protected string m_sRestoredTitle = "SAFE ZONE";
+	string m_sRestoredTitle;
 
 
 	[Attribute(
@@ -259,8 +256,7 @@ class BPS_CombatConfig
 		UIWidgets.EditBox,
 		"Supports localization keys."
 	)]
-	protected string m_sRestoredMessage =
-		"Your Safe Zone protection has been restored.";
+	string m_sRestoredMessage;
 
 
 	float GetDuration()
@@ -315,7 +311,7 @@ class BPS_FriendlyFireConfig
 		UIWidgets.CheckBox,
 		"Block friendly damage against a friendly player who is inside the Safe Zone."
 	)]
-	protected bool m_bEnabled = true;
+	bool m_bEnabled;
 
 
 	[Attribute(
@@ -323,7 +319,7 @@ class BPS_FriendlyFireConfig
 		UIWidgets.EditBox,
 		"Warning cooldown."
 	)]
-	protected float m_fWarningCooldown = 2.0;
+	float m_fWarningCooldown;
 
 
 	[Attribute(
@@ -331,7 +327,7 @@ class BPS_FriendlyFireConfig
 		UIWidgets.EditBox,
 		"Warning duration."
 	)]
-	protected float m_fMessageDuration = 4.0;
+	float m_fMessageDuration;
 
 
 	[Attribute(
@@ -339,7 +335,7 @@ class BPS_FriendlyFireConfig
 		UIWidgets.EditBox,
 		"Supports localization keys."
 	)]
-	protected string m_sTitle = "FRIENDLY FIRE BLOCKED";
+	string m_sTitle;
 
 
 	[Attribute(
@@ -347,8 +343,7 @@ class BPS_FriendlyFireConfig
 		UIWidgets.EditBox,
 		"Supports localization keys."
 	)]
-	protected string m_sMessage =
-		"You cannot damage allies inside the Safe Zone.";
+	string m_sMessage;
 
 
 	bool IsEnabled()
