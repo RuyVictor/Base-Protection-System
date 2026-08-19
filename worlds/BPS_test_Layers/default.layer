@@ -7,4 +7,6 @@ BPS_SafeZoneTriggerEntity {
  "Polyline Height" 20
  DrawShape 1
  TriggerActivationType "All changes"
+ m_IntruderConfig BPS_IntruderConfig "{6A257DA4F0E86FAF}" {
+ }
 }

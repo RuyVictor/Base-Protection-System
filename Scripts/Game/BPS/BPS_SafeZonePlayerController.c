@@ -1,6 +1,5 @@
 modded class SCR_PlayerController
 {
-	//------------------------------------------------------------------------------------------------
 	void BPS_ShowMessage(
 		string title,
 		string message,
@@ -28,7 +27,6 @@ modded class SCR_PlayerController
 	}
 
 
-	//------------------------------------------------------------------------------------------------
 	[RplRpc(
 		RplChannel.Reliable,
 		RplRcver.Owner
@@ -40,11 +38,15 @@ modded class SCR_PlayerController
 	)
 	{
 		string localizedTitle =
-			WidgetManager.Translate(title);
+			WidgetManager.Translate(
+				title
+			);
 
 
 		string localizedMessage =
-			WidgetManager.Translate(message);
+			WidgetManager.Translate(
+				message
+			);
 
 
 		SCR_HintManagerComponent.ShowCustomHint(
@@ -56,7 +58,6 @@ modded class SCR_PlayerController
 	}
 
 
-	//------------------------------------------------------------------------------------------------
 	void BPS_ShowMessageParam1(
 		string title,
 		string message,
@@ -87,7 +88,6 @@ modded class SCR_PlayerController
 	}
 
 
-	//------------------------------------------------------------------------------------------------
 	[RplRpc(
 		RplChannel.Reliable,
 		RplRcver.Owner
