@@ -375,3 +375,213 @@ class BPS_FriendlyFireConfig
 		return m_sMessage;
 	}
 }
+
+
+// ================================================================================================
+// MAP DISPLAY
+// ================================================================================================
+
+[BaseContainerProps(configRoot: true)]
+class BPS_MapDisplayConfig
+{
+	[Attribute(
+		"1",
+		UIWidgets.CheckBox,
+		"Show the Safe Zone boundary on the map."
+	)]
+	bool m_bEnabled;
+
+
+	[Attribute(
+		"2",
+		UIWidgets.Slider,
+		"Circle border thickness in pixels.",
+		"1 20 0.5"
+	)]
+	float m_fBorderSize;
+
+
+	// =============================================================================================
+	// FRIENDLY / OWNER COLORS
+	//
+	// ColorPicker selects RGB. Alpha is configured separately so transparency is
+	// always editable even when the Workbench color picker does not expose alpha.
+	// =============================================================================================
+
+	[Attribute(
+		"0 0.45 1 1",
+		UIWidgets.ColorPicker,
+		"Border RGB color when the Safe Zone belongs to the local player's faction."
+	)]
+	ref Color m_FriendlyBorderColor;
+
+
+	[Attribute(
+		"0.9",
+		UIWidgets.Slider,
+		"Friendly border alpha. 0 = invisible, 1 = opaque.",
+		"0 1 0.01"
+	)]
+	float m_fFriendlyBorderAlpha;
+
+
+	[Attribute(
+		"0 0.45 1 1",
+		UIWidgets.ColorPicker,
+		"Background RGB color when the Safe Zone belongs to the local player's faction."
+	)]
+	ref Color m_FriendlyBackgroundColor;
+
+
+	[Attribute(
+		"0.15",
+		UIWidgets.Slider,
+		"Friendly background alpha. 0 = invisible, 1 = opaque.",
+		"0 1 0.01"
+	)]
+	float m_fFriendlyBackgroundAlpha;
+
+
+	// =============================================================================================
+	// ENEMY COLORS
+	// =============================================================================================
+
+	[Attribute(
+		"1 0 0 1",
+		UIWidgets.ColorPicker,
+		"Border RGB color when the Safe Zone belongs to an enemy faction."
+	)]
+	ref Color m_EnemyBorderColor;
+
+
+	[Attribute(
+		"0.9",
+		UIWidgets.Slider,
+		"Enemy border alpha. 0 = invisible, 1 = opaque.",
+		"0 1 0.01"
+	)]
+	float m_fEnemyBorderAlpha;
+
+
+	[Attribute(
+		"1 0 0 1",
+		UIWidgets.ColorPicker,
+		"Background RGB color when the Safe Zone belongs to an enemy faction."
+	)]
+	ref Color m_EnemyBackgroundColor;
+
+
+	[Attribute(
+		"0.15",
+		UIWidgets.Slider,
+		"Enemy background alpha. 0 = invisible, 1 = opaque.",
+		"0 1 0.01"
+	)]
+	float m_fEnemyBackgroundAlpha;
+
+
+	bool IsEnabled()
+	{
+		return m_bEnabled;
+	}
+
+
+	float GetBorderSize()
+	{
+		if (m_fBorderSize < 1)
+			return 1;
+
+		return m_fBorderSize;
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	protected float ClampAlpha(float alpha)
+	{
+		if (alpha < 0)
+			return 0;
+
+		if (alpha > 1)
+			return 1;
+
+		return alpha;
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	protected Color WithAlpha(Color source, float alpha)
+	{
+		ref Color result;
+
+		if (source)
+			result = source.Copy();
+		else
+			result = new Color(1, 1, 1, 1);
+
+		result.SetA(
+			ClampAlpha(alpha)
+		);
+
+		return result;
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	Color GetFriendlyBorderColor()
+	{
+		Color source = m_FriendlyBorderColor;
+
+		if (!source)
+			source = Color.FromRGBA(0, 115, 255, 255);
+
+		return WithAlpha(
+			source,
+			m_fFriendlyBorderAlpha
+		);
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	Color GetFriendlyBackgroundColor()
+	{
+		Color source = m_FriendlyBackgroundColor;
+
+		if (!source)
+			source = Color.FromRGBA(0, 115, 255, 255);
+
+		return WithAlpha(
+			source,
+			m_fFriendlyBackgroundAlpha
+		);
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	Color GetEnemyBorderColor()
+	{
+		Color source = m_EnemyBorderColor;
+
+		if (!source)
+			source = Color.FromRGBA(255, 0, 0, 255);
+
+		return WithAlpha(
+			source,
+			m_fEnemyBorderAlpha
+		);
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	Color GetEnemyBackgroundColor()
+	{
+		Color source = m_EnemyBackgroundColor;
+
+		if (!source)
+			source = Color.FromRGBA(255, 0, 0, 255);
+
+		return WithAlpha(
+			source,
+			m_fEnemyBackgroundAlpha
+		);
+	}
+}

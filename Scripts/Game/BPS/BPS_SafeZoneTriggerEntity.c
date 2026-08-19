@@ -149,6 +149,14 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		"Friendly fire configuration."
 	)]
 	ref BPS_FriendlyFireConfig m_FriendlyFireConfig;
+
+
+	[Attribute(
+		"",
+		UIWidgets.Object,
+		"Map Safe Zone boundary configuration."
+	)]
+	ref BPS_MapDisplayConfig m_MapDisplayConfig;
 	
 	
 	// =============================================================================================
@@ -179,6 +187,12 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 	// =============================================================================================
 
 	protected static ref array<BPS_SafeZoneTriggerEntity> s_aZones =
+		new array<BPS_SafeZoneTriggerEntity>();
+
+
+	// All BPS trigger entities visible to the local map UI.
+	// Separate from s_aZones because s_aZones is the server-side damage registry.
+	protected static ref array<BPS_SafeZoneTriggerEntity> s_aMapZones =
 		new array<BPS_SafeZoneTriggerEntity>();
 
 
@@ -215,6 +229,10 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		super.OnInit(owner);
 	
 		EnsureConfig();
+
+		// Map overlay exists on clients too, so keep a local registry on every machine.
+		if (s_aMapZones.Find(this) < 0)
+			s_aMapZones.Insert(this);
 	
 		SetUpdateRate(
 			BPS_TRIGGER_UPDATE_RATE
@@ -227,6 +245,14 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 		)
 		{
 			EnablePeriodicQueries(false);
+
+			// Gameplay initialization is server-only, but the client still needs
+			// to know which candidate base became an HQ so it can draw the map circle.
+			GetGame().GetCallqueue().CallLater(
+				BPS_TryBindCampaignBaseForMap,
+				500,
+				true
+			);
 	
 			return;
 		}
@@ -274,6 +300,79 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 
 		if (!m_FriendlyFireConfig)
 			m_FriendlyFireConfig = new BPS_FriendlyFireConfig();
+
+
+		if (!m_MapDisplayConfig)
+			m_MapDisplayConfig = new BPS_MapDisplayConfig();
+	}
+
+
+	// =============================================================================================
+	// MAP DISPLAY - CLIENT BASE BINDING
+	// =============================================================================================
+
+	//------------------------------------------------------------------------------------------------
+	protected void BPS_TryBindCampaignBaseForMap()
+	{
+		if (m_CampaignBase)
+		{
+			StopMapBindingTimer();
+			return;
+		}
+
+
+		SCR_GameModeCampaign campaign =
+			SCR_GameModeCampaign.GetInstance();
+
+
+		if (!campaign)
+			return;
+
+
+		SCR_CampaignMilitaryBaseManager baseManager =
+			campaign.GetBaseManager();
+
+
+		if (!baseManager)
+			return;
+
+
+		if (!baseManager.IsBasesInitDone())
+			return;
+
+
+		m_CampaignBase =
+			baseManager.FindClosestBase(
+				GetOrigin()
+			);
+
+
+		if (!m_CampaignBase)
+			return;
+
+
+		StopMapBindingTimer();
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	protected void StopMapBindingTimer()
+	{
+		if (!GetGame())
+			return;
+
+
+		ScriptCallQueue queue =
+			GetGame().GetCallqueue();
+
+
+		if (!queue)
+			return;
+
+
+		queue.Remove(
+			BPS_TryBindCampaignBaseForMap
+		);
 	}
 
 
@@ -1963,6 +2062,143 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 
 
 	// =============================================================================================
+	// MAP DISPLAY API
+	// =============================================================================================
+
+	//------------------------------------------------------------------------------------------------
+	static void BPS_CopyMapZones(notnull array<BPS_SafeZoneTriggerEntity> zones)
+	{
+		zones.Clear();
+
+
+		foreach (
+			BPS_SafeZoneTriggerEntity zone :
+			s_aMapZones
+		)
+		{
+			if (zone)
+				zones.Insert(zone);
+		}
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	bool BPS_ShouldShowMapBoundary()
+	{
+		if (!m_MapDisplayConfig)
+			return false;
+
+
+		if (!m_MapDisplayConfig.IsEnabled())
+			return false;
+
+
+		// Only the bases actually selected as HQs should display a Safe Zone.
+		if (!m_CampaignBase)
+			return false;
+
+
+		return m_CampaignBase.IsHQ();
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	vector BPS_GetMapWorldPosition()
+	{
+		return GetOrigin();
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	float BPS_GetMapRadius()
+	{
+		// The native trigger Sphere Radius remains the single source of truth.
+		return GetSphereRadius();
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	float BPS_GetMapBorderSize()
+	{
+		return m_MapDisplayConfig.GetBorderSize();
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	bool BPS_IsEnemyMapZoneForLocalPlayer()
+	{
+		if (!m_CampaignBase)
+			return false;
+
+
+		Faction zoneFaction =
+			m_CampaignBase.GetFaction();
+
+
+		if (!zoneFaction)
+			return false;
+
+
+		// IMPORTANT:
+		// Use the faction AFFILIATED with the local player, not the faction of
+		// the entity currently controlled by the player. The controlled entity
+		// can change while driving, using turrets, respawning or opening UI.
+		Faction localFaction =
+			SCR_FactionManager.SGetLocalPlayerFaction();
+
+
+		// Fallback for edge cases where the local faction has not yet been
+		// exposed through the convenience accessor.
+		if (!localFaction)
+		{
+			int localPlayerId =
+				SCR_PlayerController.GetLocalPlayerId();
+
+
+			if (localPlayerId > 0)
+			{
+				localFaction =
+					SCR_FactionManager.SGetPlayerFaction(
+						localPlayerId
+					);
+			}
+		}
+
+
+		if (!localFaction)
+			return false;
+
+
+		return (
+			localFaction.GetFactionKey() !=
+			zoneFaction.GetFactionKey()
+		);
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	Color BPS_GetMapBorderColor()
+	{
+		if (BPS_IsEnemyMapZoneForLocalPlayer())
+			return m_MapDisplayConfig.GetEnemyBorderColor();
+
+
+		return m_MapDisplayConfig.GetFriendlyBorderColor();
+	}
+
+
+	//------------------------------------------------------------------------------------------------
+	Color BPS_GetMapBackgroundColor()
+	{
+		if (BPS_IsEnemyMapZoneForLocalPlayer())
+			return m_MapDisplayConfig.GetEnemyBackgroundColor();
+
+
+		return m_MapDisplayConfig.GetFriendlyBackgroundColor();
+	}
+
+
+	// =============================================================================================
 	// CONFIG HELPERS
 	// =============================================================================================
 
@@ -2160,8 +2396,20 @@ class BPS_SafeZoneTriggerEntity : SCR_BaseTriggerEntity
 				queue.Remove(
 					BPS_LogicTick
 				);
+
+				queue.Remove(
+					BPS_TryBindCampaignBaseForMap
+				);
 			}
 		}
+
+
+		int mapIndex =
+			s_aMapZones.Find(this);
+
+
+		if (mapIndex >= 0)
+			s_aMapZones.Remove(mapIndex);
 
 
 		int index =
