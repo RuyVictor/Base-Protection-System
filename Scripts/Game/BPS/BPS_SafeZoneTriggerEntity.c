@@ -103,30 +103,30 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 		"",
 		ParamEnumArray.FromEnum(BPS_ETriggerShapeType)
 	)]
-	protected BPS_ETriggerShapeType m_eTriggerShapeType = BPS_ETriggerShapeType.Cylindrical;
+	protected BPS_ETriggerShapeType m_eTriggerShapeType;
 
 	[Attribute(
 		"200",
 		UIWidgets.Slider,
 		"Horizontal Size. Cylindrical = diameter. Square = side length.",
-		"1 5000 1"
+		"1 10000 1"
 	)]
-	protected float m_fHorizontalSize = 200.0;
+	protected float m_fHorizontalSize;
 
 	[Attribute(
 		"40",
 		UIWidgets.Slider,
 		"Safe Zone height. The volume extends half above and half below the entity origin.",
-		"1 1000 1"
+		"1 10000 1"
 	)]
-	protected float m_fHeight = 40.0;
+	protected float m_fHeight;
 
 	[Attribute(
 		"1",
 		UIWidgets.CheckBox,
 		"Show the real BPS volume in the World Editor and in-game."
 	)]
-	protected bool m_bShowDebugShape = true;
+	protected bool m_bShowDebugShape;
 
 	// =============================================================================================
 	// CONFIGURATION
