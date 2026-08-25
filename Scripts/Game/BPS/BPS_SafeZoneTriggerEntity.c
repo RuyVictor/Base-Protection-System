@@ -89,7 +89,7 @@ class BPS_SafeZoneTriggerEntityClass : GenericEntityClass
 class BPS_SafeZoneTriggerEntity : GenericEntity
 {
 	protected static const int BPS_LOGIC_INTERVAL_MS = 100;
-	protected static const int BPS_PRESENCE_INTERVAL_MS = 250;
+	protected static const int BPS_PRESENCE_INTERVAL_MS = 500;
 	protected static const int BPS_DEBUG_CYLINDER_SEGMENTS = 48;
 	protected static const int BPS_MAP_CYLINDER_SEGMENTS = 64;
 
@@ -169,25 +169,18 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	void BPS_SafeZoneTriggerEntity(IEntitySource src, IEntity parent)
 	{
 		SetFlags(EntityFlags.ACTIVE);
-		SetEventMask(EntityEvent.INIT | EntityEvent.FRAME);
-	}
-
-	//------------------------------------------------------------------------------------------------
-	override void EOnFrame(IEntity owner, float timeSlice)
-	{
-		// ShapeFlags.ONCE only persists for the current rendered frame, so the debug
-		// volume must be recreated every frame while runtime debug is enabled.
-		// Dedicated servers have no local renderer and must not spend time drawing it.
-		if (!m_bShowDebugShape || RplSession.Mode() == RplMode.Dedicated)
-			return;
-
-		BPS_DrawDebugShape();
+		// IMPORTANT: no FRAME event. Runtime debug uses one persistent Shape instead.
+		SetEventMask(EntityEvent.INIT);
 	}
 
 	//------------------------------------------------------------------------------------------------
 	override void EOnInit(IEntity owner)
 	{
 		EnsureConfig();
+
+		// Client/rendering instances get a single persistent debug shape. Dedicated
+		// servers are rejected inside BPS_CreateRuntimeDebugShape().
+		BPS_CreateRuntimeDebugShape();
 
 		if (s_aMapZones.Find(this) < 0)
 			s_aMapZones.Insert(this);
@@ -387,7 +380,7 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 			BPS_GetBroadPhaseRadius(),
 			BPS_OnQueryEntity,
 			BPS_FilterQueryEntity,
-			EQueryEntitiesFlags.ALL
+			EQueryEntitiesFlags.DYNAMIC | EQueryEntitiesFlags.NO_PROXIES
 		);
 	}
 
@@ -397,10 +390,12 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 		if (!ent || ent == this)
 			return false;
 
+		// Query is already DYNAMIC | NO_PROXIES. Avoid FindComponent() on every
+		// nearby dynamic entity; direct casts are significantly cheaper.
 		if (ChimeraCharacter.Cast(ent))
 			return true;
 
-		return GetCompartmentManager(ent) != null;
+		return Vehicle.Cast(ent) != null;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -417,7 +412,7 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 			return true;
 		}
 
-		if (GetCompartmentManager(ent) && m_aVehiclesInside.Find(ent) < 0)
+		if (Vehicle.Cast(ent) && m_aVehiclesInside.Find(ent) < 0)
 			m_aVehiclesInside.Insert(ent);
 
 		return true;
@@ -1444,136 +1439,51 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	}
 
 	// =============================================================================================
-	// DEBUG VOLUME - WORLD EDITOR
+	// DEBUG VOLUME - RUNTIME + WORLD EDITOR
 	// =============================================================================================
-#ifdef WORKBENCH
-	// Workbench edits the IEntitySource/BaseContainer first. The live script instance used by
-	// _WB_AfterWorldUpdate is not guaranteed to receive those Attribute values immediately.
-	// Keep the editor source so the preview can synchronize every editor frame while a slider
-	// is being dragged, and also synchronize immediately from _WB_OnKeyChanged.
-	protected IEntitySource m_BPSWorkbenchSource;
+	// Runtime uses ONE persistent Shape per safe zone. Workbench uses ONE ONCE Shape per editor
+	// frame. The previous implementation created one Shape for every line segment every frame,
+	// which caused thousands of native Shape allocations per second.
+	protected ref Shape m_BPSRuntimeDebugShape;
+	protected vector m_BPSDebugLinePoints[208];
 
 	//------------------------------------------------------------------------------------------------
-	override void _WB_OnInit(inout vector mat[4], IEntitySource src)
+	protected int BPS_BuildDebugLinePoints()
 	{
-		super._WB_OnInit(mat, src);
-
-		m_BPSWorkbenchSource = src;
-		BPS_WBSyncShapeProperties(src);
-	}
-
-	//------------------------------------------------------------------------------------------------
-	override bool _WB_OnKeyChanged(BaseContainer src, string key, BaseContainerList ownerContainers, IEntity parent)
-	{
-		// Sync before the next draw. This fires for ComboBox changes and for slider edits.
-		// Using the source values is important because the live entity instance may still hold
-		// the old serialized Attribute values at this point.
-		BPS_WBSyncShapeProperties(src);
-
-		return super._WB_OnKeyChanged(src, key, ownerContainers, parent);
-	}
-
-	//------------------------------------------------------------------------------------------------
-	override int _WB_GetAfterWorldUpdateSpecs(IEntitySource src)
-	{
-		// Keep the current source in case the editor recreated/reloaded the entity source.
-		m_BPSWorkbenchSource = src;
-
-		// Draw while visible. ONCE debug shapes are recreated each editor frame.
-		return EEntityFrameUpdateSpecs.CALL_WHEN_ENTITY_VISIBLE;
-	}
-
-	//------------------------------------------------------------------------------------------------
-	override void _WB_AfterWorldUpdate(float timeSlice)
-	{
-		// Critical for real-time sliders: read the current editor container every frame.
-		// This also covers cases where Workbench updates a slider value continuously without
-		// immediately propagating the serialized Attribute into this live script instance.
-		if (m_BPSWorkbenchSource)
-			BPS_WBSyncShapeProperties(m_BPSWorkbenchSource);
-
-		if (!m_bShowDebugShape)
-			return;
-
-		BPS_DrawDebugShape();
-	}
-
-	//------------------------------------------------------------------------------------------------
-	protected void BPS_WBSyncShapeProperties(BaseContainer src)
-	{
-		if (!src)
-			return;
-
-		int shapeTypeValue;
-		if (src.Get("m_eTriggerShapeType", shapeTypeValue))
-		{
-			if (shapeTypeValue == BPS_ETriggerShapeType.Square)
-				m_eTriggerShapeType = BPS_ETriggerShapeType.Square;
-			else
-				m_eTriggerShapeType = BPS_ETriggerShapeType.Cylindrical;
-		}
-
-		float horizontalSizeValue;
-		if (src.Get("m_fHorizontalSize", horizontalSizeValue))
-			m_fHorizontalSize = horizontalSizeValue;
-
-		float heightValue;
-		if (src.Get("m_fHeight", heightValue))
-			m_fHeight = heightValue;
-
-		bool showDebugValue;
-		if (src.Get("m_bShowDebugShape", showDebugValue))
-			m_bShowDebugShape = showDebugValue;
-	}
-#endif
-
-	//------------------------------------------------------------------------------------------------
-	protected void BPS_DrawDebugLine(vector from, vector to, int color, ShapeFlags flags)
-	{
-		vector points[2];
-		points[0] = from;
-		points[1] = to;
-		Shape.CreateLines(color, flags, points, 2);
-	}
-
-	//------------------------------------------------------------------------------------------------
-	protected void BPS_DrawDebugShape()
-	{
-		vector transform[4];
-		GetWorldTransform(transform);
-
 		float halfHorizontal = BPS_GetHorizontalSize() * 0.5;
 		float halfHeight = BPS_GetHeight() * 0.5;
-
-		Color debugColor = Color.FromRGBA(0, 255, 70, 220);
-		int color = debugColor.PackToInt();
-		ShapeFlags flags = ShapeFlags.ONCE | ShapeFlags.NOZBUFFER | ShapeFlags.TRANSP;
+		int count = 0;
 
 		if (m_eTriggerShapeType == BPS_ETriggerShapeType.Square)
 		{
 			vector corners[8];
-			corners[0] = Vector(-halfHorizontal, -halfHeight, -halfHorizontal).Multiply4(transform);
-			corners[1] = Vector( halfHorizontal, -halfHeight, -halfHorizontal).Multiply4(transform);
-			corners[2] = Vector( halfHorizontal, -halfHeight,  halfHorizontal).Multiply4(transform);
-			corners[3] = Vector(-halfHorizontal, -halfHeight,  halfHorizontal).Multiply4(transform);
-			corners[4] = Vector(-halfHorizontal,  halfHeight, -halfHorizontal).Multiply4(transform);
-			corners[5] = Vector( halfHorizontal,  halfHeight, -halfHorizontal).Multiply4(transform);
-			corners[6] = Vector( halfHorizontal,  halfHeight,  halfHorizontal).Multiply4(transform);
-			corners[7] = Vector(-halfHorizontal,  halfHeight,  halfHorizontal).Multiply4(transform);
+			corners[0] = Vector(-halfHorizontal, -halfHeight, -halfHorizontal);
+			corners[1] = Vector( halfHorizontal, -halfHeight, -halfHorizontal);
+			corners[2] = Vector( halfHorizontal, -halfHeight,  halfHorizontal);
+			corners[3] = Vector(-halfHorizontal, -halfHeight,  halfHorizontal);
+			corners[4] = Vector(-halfHorizontal,  halfHeight, -halfHorizontal);
+			corners[5] = Vector( halfHorizontal,  halfHeight, -halfHorizontal);
+			corners[6] = Vector( halfHorizontal,  halfHeight,  halfHorizontal);
+			corners[7] = Vector(-halfHorizontal,  halfHeight,  halfHorizontal);
 
-			BPS_DrawDebugLine(corners[0], corners[1], color, flags);
-			BPS_DrawDebugLine(corners[1], corners[2], color, flags);
-			BPS_DrawDebugLine(corners[2], corners[3], color, flags);
-			BPS_DrawDebugLine(corners[3], corners[0], color, flags);
-			BPS_DrawDebugLine(corners[4], corners[5], color, flags);
-			BPS_DrawDebugLine(corners[5], corners[6], color, flags);
-			BPS_DrawDebugLine(corners[6], corners[7], color, flags);
-			BPS_DrawDebugLine(corners[7], corners[4], color, flags);
-			BPS_DrawDebugLine(corners[0], corners[4], color, flags);
-			BPS_DrawDebugLine(corners[1], corners[5], color, flags);
-			BPS_DrawDebugLine(corners[2], corners[6], color, flags);
-			BPS_DrawDebugLine(corners[3], corners[7], color, flags);
-			return;
+			// Bottom
+			m_BPSDebugLinePoints[count++] = corners[0]; m_BPSDebugLinePoints[count++] = corners[1];
+			m_BPSDebugLinePoints[count++] = corners[1]; m_BPSDebugLinePoints[count++] = corners[2];
+			m_BPSDebugLinePoints[count++] = corners[2]; m_BPSDebugLinePoints[count++] = corners[3];
+			m_BPSDebugLinePoints[count++] = corners[3]; m_BPSDebugLinePoints[count++] = corners[0];
+
+			// Top
+			m_BPSDebugLinePoints[count++] = corners[4]; m_BPSDebugLinePoints[count++] = corners[5];
+			m_BPSDebugLinePoints[count++] = corners[5]; m_BPSDebugLinePoints[count++] = corners[6];
+			m_BPSDebugLinePoints[count++] = corners[6]; m_BPSDebugLinePoints[count++] = corners[7];
+			m_BPSDebugLinePoints[count++] = corners[7]; m_BPSDebugLinePoints[count++] = corners[4];
+
+			// Verticals
+			m_BPSDebugLinePoints[count++] = corners[0]; m_BPSDebugLinePoints[count++] = corners[4];
+			m_BPSDebugLinePoints[count++] = corners[1]; m_BPSDebugLinePoints[count++] = corners[5];
+			m_BPSDebugLinePoints[count++] = corners[2]; m_BPSDebugLinePoints[count++] = corners[6];
+			m_BPSDebugLinePoints[count++] = corners[3]; m_BPSDebugLinePoints[count++] = corners[7];
+			return count;
 		}
 
 		for (int i = 0; i < BPS_DEBUG_CYLINDER_SEGMENTS; i++)
@@ -1582,24 +1492,192 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 			float angleA = (Math.PI2 * i) / BPS_DEBUG_CYLINDER_SEGMENTS;
 			float angleB = (Math.PI2 * next) / BPS_DEBUG_CYLINDER_SEGMENTS;
 
-			vector bottomA = Vector(Math.Cos(angleA) * halfHorizontal, -halfHeight, Math.Sin(angleA) * halfHorizontal).Multiply4(transform);
-			vector bottomB = Vector(Math.Cos(angleB) * halfHorizontal, -halfHeight, Math.Sin(angleB) * halfHorizontal).Multiply4(transform);
-			vector topA = Vector(Math.Cos(angleA) * halfHorizontal, halfHeight, Math.Sin(angleA) * halfHorizontal).Multiply4(transform);
-			vector topB = Vector(Math.Cos(angleB) * halfHorizontal, halfHeight, Math.Sin(angleB) * halfHorizontal).Multiply4(transform);
+			vector bottomA = Vector(Math.Cos(angleA) * halfHorizontal, -halfHeight, Math.Sin(angleA) * halfHorizontal);
+			vector bottomB = Vector(Math.Cos(angleB) * halfHorizontal, -halfHeight, Math.Sin(angleB) * halfHorizontal);
+			vector topA = Vector(Math.Cos(angleA) * halfHorizontal, halfHeight, Math.Sin(angleA) * halfHorizontal);
+			vector topB = Vector(Math.Cos(angleB) * halfHorizontal, halfHeight, Math.Sin(angleB) * halfHorizontal);
 
-			BPS_DrawDebugLine(bottomA, bottomB, color, flags);
-			BPS_DrawDebugLine(topA, topB, color, flags);
+			m_BPSDebugLinePoints[count++] = bottomA;
+			m_BPSDebugLinePoints[count++] = bottomB;
+			m_BPSDebugLinePoints[count++] = topA;
+			m_BPSDebugLinePoints[count++] = topB;
 
 			if ((i % 6) == 0)
-				BPS_DrawDebugLine(bottomA, topA, color, flags);
+			{
+				m_BPSDebugLinePoints[count++] = bottomA;
+				m_BPSDebugLinePoints[count++] = topA;
+			}
+		}
+
+		return count;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected Shape BPS_CreateDebugShape(bool once)
+	{
+		if (!m_bShowDebugShape)
+			return null;
+
+		int pointCount = BPS_BuildDebugLinePoints();
+		if (pointCount <= 0)
+			return null;
+
+		Color debugColor = Color.FromRGBA(0, 255, 70, 220);
+		int color = debugColor.PackToInt();
+
+		ShapeFlags flags = ShapeFlags.NOZBUFFER | ShapeFlags.TRANSP;
+		if (once)
+			flags |= ShapeFlags.ONCE;
+		else
+			flags |= ShapeFlags.VISIBLE;
+
+		Shape shape = Shape.CreateLines(color, flags, m_BPSDebugLinePoints, pointCount);
+		if (!shape)
+			return null;
+
+		vector transform[4];
+		GetWorldTransform(transform);
+		shape.SetMatrix(transform);
+		return shape;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected void BPS_CreateRuntimeDebugShape()
+	{
+		// Dedicated server / console mode has no renderer. Most importantly, no FRAME event is
+		// registered anywhere, so debug has zero per-frame server callback cost.
+		if (!m_bShowDebugShape)
+		{
+			BPS_DestroyRuntimeDebugShape();
+			return;
+		}
+
+		if (System.IsConsoleApp())
+			return;
+
+#ifdef WORKBENCH
+		// In Tools edit mode the Workbench callback below owns the preview. Only create the
+		// persistent runtime shape when actually running the game.
+		if (!GetGame() || !GetGame().InPlayMode())
+			return;
+#endif
+
+		BPS_DestroyRuntimeDebugShape();
+		m_BPSRuntimeDebugShape = BPS_CreateDebugShape(false);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected void BPS_DestroyRuntimeDebugShape()
+	{
+		if (!m_BPSRuntimeDebugShape)
+			return;
+
+		delete m_BPSRuntimeDebugShape;
+		m_BPSRuntimeDebugShape = null;
+	}
+
+#ifdef WORKBENCH
+	//------------------------------------------------------------------------------------------------
+	override void _WB_OnInit(inout vector mat[4], IEntitySource src)
+	{
+		super._WB_OnInit(mat, src);
+
+		if (src)
+			BPS_WBSyncChangedProperty(src, "m_eTriggerShapeType");
+		if (src)
+			BPS_WBSyncChangedProperty(src, "m_fHorizontalSize");
+		if (src)
+			BPS_WBSyncChangedProperty(src, "m_fHeight");
+		if (src)
+			BPS_WBSyncChangedProperty(src, "m_bShowDebugShape");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override bool _WB_OnKeyChanged(BaseContainer src, string key, BaseContainerList ownerContainers, IEntity parent)
+	{
+		// Read only the property Workbench says changed. This is the same pattern used by
+		// vanilla editor entities and works continuously while dragging sliders.
+		BPS_WBSyncChangedProperty(src, key);
+
+		// If a property is edited while Play Mode is active, rebuild the one persistent
+		// runtime shape once. There is still no per-frame entity event.
+		if (GetGame() && GetGame().InPlayMode())
+			BPS_CreateRuntimeDebugShape();
+
+		return super._WB_OnKeyChanged(src, key, ownerContainers, parent);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected void BPS_WBSyncChangedProperty(BaseContainer src, string key)
+	{
+		if (!src)
+			return;
+
+		if (key == "m_eTriggerShapeType")
+		{
+			int shapeTypeValue;
+			if (src.Get(key, shapeTypeValue))
+			{
+				if (shapeTypeValue == BPS_ETriggerShapeType.Square)
+					m_eTriggerShapeType = BPS_ETriggerShapeType.Square;
+				else
+					m_eTriggerShapeType = BPS_ETriggerShapeType.Cylindrical;
+			}
+			return;
+		}
+
+		if (key == "m_fHorizontalSize")
+		{
+			float horizontalSizeValue;
+			if (src.Get(key, horizontalSizeValue))
+				m_fHorizontalSize = horizontalSizeValue;
+			return;
+		}
+
+		if (key == "m_fHeight")
+		{
+			float heightValue;
+			if (src.Get(key, heightValue))
+				m_fHeight = heightValue;
+			return;
+		}
+
+		if (key == "m_bShowDebugShape")
+		{
+			bool showDebugValue;
+			if (src.Get(key, showDebugValue))
+				m_bShowDebugShape = showDebugValue;
 		}
 	}
+
+	//------------------------------------------------------------------------------------------------
+	override int _WB_GetAfterWorldUpdateSpecs(IEntitySource src)
+	{
+		return EEntityFrameUpdateSpecs.CALL_WHEN_ENTITY_VISIBLE;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override void _WB_AfterWorldUpdate(float timeSlice)
+	{
+		// When Play Mode is running, the persistent runtime shape is used instead.
+		if (GetGame() && GetGame().InPlayMode())
+			return;
+
+		if (!m_bShowDebugShape)
+			return;
+
+		// ONE native Shape allocation per editor frame, not one allocation per segment.
+		BPS_CreateDebugShape(true);
+	}
+#endif
 
 	// =============================================================================================
 	// CLEANUP
 	// =============================================================================================
 	void ~BPS_SafeZoneTriggerEntity()
 	{
+		BPS_DestroyRuntimeDebugShape();
+
 		if (GetGame())
 		{
 			ScriptCallQueue queue = GetGame().GetCallqueue();
