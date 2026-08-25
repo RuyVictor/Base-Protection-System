@@ -2,8 +2,11 @@
 // BPS - Base Protection System
 // Safe Zone geometry: CYLINDER or SQUARE.
 //
-// Uses GenericEntity + an internal world query, so no native sphere-trigger properties are exposed.
+// Uses GenericEntity with explicit mathematical volume checks, so no native sphere-trigger properties are exposed.
 // The real gameplay boundary is always validated by BPS_IsWorldPositionInsideShape().
+// Debug visualization uses native Enfusion Shape primitives: CreateCylinder and BBOX.
+// Native cylinder orientation is kept untouched (vertical in actual Reforger usage).
+// Legacy compatibility helpers and obsolete vehicle-inside state have been removed.
 //------------------------------------------------------------------------------------------------
 
 enum BPS_ETriggerShapeType
@@ -17,8 +20,7 @@ class BPS_CharacterState
 {
 	IEntity m_Character;
 
-	bool m_bDirectInside;
-	bool m_bVehicleInside;
+	bool m_bInside;
 	bool m_bWasInside;
 
 	int m_iIntruderStartTime;
@@ -34,8 +36,7 @@ class BPS_CharacterState
 	void BPS_CharacterState(IEntity character)
 	{
 		m_Character = character;
-		m_bDirectInside = false;
-		m_bVehicleInside = false;
+		m_bInside = false;
 		m_bWasInside = false;
 		m_iIntruderStartTime = -1;
 		m_iLastIntruderSecond = -1;
@@ -49,7 +50,7 @@ class BPS_CharacterState
 
 	bool IsInside()
 	{
-		return m_bDirectInside || m_bVehicleInside;
+		return m_bInside;
 	}
 }
 
@@ -90,8 +91,9 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 {
 	protected static const int BPS_LOGIC_INTERVAL_MS = 100;
 	protected static const int BPS_PRESENCE_INTERVAL_MS = 500;
-	protected static const int BPS_DEBUG_CYLINDER_SEGMENTS = 48;
-	protected static const int BPS_MAP_CYLINDER_SEGMENTS = 64;
+	protected static const int BPS_FACTION_CHECK_INTERVAL_MS = 1000;
+	// Only the 2D map outline needs polygon segmentation. The 3D debug volume uses native shapes.
+	protected static const int BPS_MAP_CYLINDER_SEGMENTS = 32;
 
 	// =============================================================================================
 	// SHAPE
@@ -153,14 +155,13 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	protected FactionKey m_sLastBaseFactionKey;
 	protected bool m_bBPSInitialized;
 	protected int m_iLastPresenceRefreshTime = -1;
+	protected int m_iLastFactionCheckTime = -1;
 
 	protected static ref array<BPS_SafeZoneTriggerEntity> s_aZones = new array<BPS_SafeZoneTriggerEntity>();
 	protected static ref array<BPS_SafeZoneTriggerEntity> s_aMapZones = new array<BPS_SafeZoneTriggerEntity>();
 
 	protected ref array<ref BPS_CharacterState> m_aStates = new array<ref BPS_CharacterState>();
-	protected ref array<IEntity> m_aVehiclesInside = new array<IEntity>();
-	protected ref array<IEntity> m_aOccupants = new array<IEntity>();
-	protected ref array<BaseCompartmentSlot> m_aCompartments = new array<BaseCompartmentSlot>();
+	protected ref array<int> m_aPlayerIds = new array<int>();
 	protected ref array<ref BPS_TurretWeaponState> m_aTurretStates = new array<ref BPS_TurretWeaponState>();
 
 	// =============================================================================================
@@ -249,37 +250,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	}
 
 	//------------------------------------------------------------------------------------------------
-	float BPS_GetShapeRadius()
-	{
-		return BPS_GetHorizontalSize() * 0.5;
-	}
-
-	//------------------------------------------------------------------------------------------------
-	float BPS_GetShapeHeight()
-	{
-		return BPS_GetHeight();
-	}
-
-	//------------------------------------------------------------------------------------------------
-	BPS_ETriggerShapeType BPS_GetShapeType()
-	{
-		return m_eTriggerShapeType;
-	}
-
-	//------------------------------------------------------------------------------------------------
-	protected float BPS_GetBroadPhaseRadius()
-	{
-		float halfHorizontal = BPS_GetHorizontalSize() * 0.5;
-		float halfHeight = BPS_GetHeight() * 0.5;
-		float horizontalExtent = halfHorizontal;
-
-		if (m_eTriggerShapeType == BPS_ETriggerShapeType.Square)
-			horizontalExtent = halfHorizontal * Math.Sqrt(2.0);
-
-		return Math.Sqrt(horizontalExtent * horizontalExtent + halfHeight * halfHeight) + 0.5;
-	}
-
-	//------------------------------------------------------------------------------------------------
 	bool BPS_IsWorldPositionInsideShape(vector worldPosition)
 	{
 		vector transform[4];
@@ -354,68 +324,65 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	}
 
 	// =============================================================================================
-	// PRESENCE QUERY
+	// PLAYER PRESENCE - NO WORLD QUERY
 	// =============================================================================================
-	// GenericEntity is used intentionally so the prefab does not expose native sphere trigger
-	// properties. A private world query gathers candidates; BPS then performs the exact shape test.
+	// The BPS only needs to track human players for enter/exit, intrusion and combat lock.
+	// Iterating PlayerManager is bounded by connected player count (for example 128) and avoids
+	// QueryEntitiesBySphere scanning every nearby dynamic entity. Empty vehicle protection is
+	// evaluated directly when that vehicle receives damage, so vehicles do not need polling.
 	protected void BPS_RefreshPresence()
 	{
 		foreach (BPS_CharacterState state : m_aStates)
 		{
 			if (state)
 			{
-				state.m_bDirectInside = false;
-				state.m_bVehicleInside = false;
+				state.m_bInside = false;
 			}
 		}
 
-		m_aVehiclesInside.Clear();
-
-		BaseWorld world = GetGame().GetWorld();
-		if (!world)
+		PlayerManager playerManager = GetGame().GetPlayerManager();
+		if (!playerManager)
 			return;
 
-		world.QueryEntitiesBySphere(
-			GetOrigin(),
-			BPS_GetBroadPhaseRadius(),
-			BPS_OnQueryEntity,
-			BPS_FilterQueryEntity,
-			EQueryEntitiesFlags.DYNAMIC | EQueryEntitiesFlags.NO_PROXIES
-		);
+		m_aPlayerIds.Clear();
+		playerManager.GetPlayers(m_aPlayerIds);
+
+		foreach (int playerId : m_aPlayerIds)
+		{
+			IEntity controlled = playerManager.GetPlayerControlledEntity(playerId);
+			ChimeraCharacter character = ChimeraCharacter.Cast(controlled);
+			if (!character)
+				continue;
+
+			if (!BPS_IsCharacterInsideShape(character))
+				continue;
+
+			BPS_CharacterState state = GetOrCreateCharacterState(character);
+			state.m_bInside = true;
+		}
 	}
 
 	//------------------------------------------------------------------------------------------------
-	protected bool BPS_FilterQueryEntity(IEntity ent)
+	protected bool BPS_IsCharacterInsideShape(ChimeraCharacter character)
 	{
-		if (!ent || ent == this)
+		if (!character)
 			return false;
 
-		// Query is already DYNAMIC | NO_PROXIES. Avoid FindComponent() on every
-		// nearby dynamic entity; direct casts are significantly cheaper.
-		if (ChimeraCharacter.Cast(ent))
+		// On foot (and most vehicle seats), character origin is enough.
+		if (BPS_IsEntityInsideShape(character))
 			return true;
 
-		return Vehicle.Cast(ent) != null;
-	}
+		// Preserve the previous BPS vehicle semantic: if the vehicle root is inside the zone,
+		// its occupant is treated as inside even when the character proxy/origin is offset.
+		CompartmentAccessComponent access = character.GetCompartmentAccessComponent();
+		if (!access || !access.IsInCompartment())
+			return false;
 
-	//------------------------------------------------------------------------------------------------
-	protected bool BPS_OnQueryEntity(IEntity ent)
-	{
-		if (!ent || !BPS_IsEntityInsideShape(ent))
-			return true;
+		IEntity vehicle = CompartmentAccessComponent.GetVehicleIn(character);
+		if (!vehicle)
+			return false;
 
-		ChimeraCharacter character = ChimeraCharacter.Cast(ent);
-		if (character)
-		{
-			BPS_CharacterState state = GetOrCreateCharacterState(character);
-			state.m_bDirectInside = true;
-			return true;
-		}
-
-		if (Vehicle.Cast(ent) && m_aVehiclesInside.Find(ent) < 0)
-			m_aVehiclesInside.Insert(ent);
-
-		return true;
+		return BPS_IsEntityInsideShape(vehicle);
 	}
 
 	// =============================================================================================
@@ -423,7 +390,14 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	// =============================================================================================
 	protected void BPS_LogicTick()
 	{
-		BPS_CheckBaseFaction();
+		if (
+			m_iLastFactionCheckTime < 0 ||
+			System.GetTickCount(m_iLastFactionCheckTime) >= BPS_FACTION_CHECK_INTERVAL_MS
+		)
+		{
+			BPS_CheckBaseFaction();
+			m_iLastFactionCheckTime = System.GetTickCount();
+		}
 
 		if (
 			m_iLastPresenceRefreshTime < 0 ||
@@ -440,9 +414,8 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 				turretState.m_bSeen = false;
 		}
 
-		ProcessVehicles();
-		CleanupTurretStates();
 		ProcessCharacters();
+		CleanupTurretStates();
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -561,92 +534,44 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	}
 
 	// =============================================================================================
-	// VEHICLES
+	// TURRET / MOUNTED WEAPON - CURRENT PLAYER SEAT ONLY
 	// =============================================================================================
-	protected void ProcessVehicles()
+	// Instead of scanning every compartment of every vehicle in the safe zone, inspect only the
+	// compartment occupied by each protected player that is currently inside.
+	protected bool ProcessCharacterTurret(BPS_CharacterState characterState)
 	{
-		for (int i = m_aVehiclesInside.Count() - 1; i >= 0; i--)
+		if (!characterState || !characterState.m_Character)
+			return false;
+
+		ChimeraCharacter character = ChimeraCharacter.Cast(characterState.m_Character);
+		if (!character)
+			return false;
+
+		CompartmentAccessComponent access = character.GetCompartmentAccessComponent();
+		if (!access || !access.IsInCompartment())
+			return false;
+
+		ExtBaseCompartmentSlot slot = ExtBaseCompartmentSlot.Cast(access.GetCompartment());
+		if (!slot)
+			return false;
+
+		TurretControllerComponent turret = slot.GetAttachedTurret();
+		if (!turret)
+			return false;
+
+		BPS_TurretWeaponState turretState = GetOrCreateTurretState(turret);
+		turretState.m_bSeen = true;
+
+		if (turretState.m_Operator != character)
 		{
-			IEntity vehicle = m_aVehiclesInside[i];
-			if (!vehicle || !BPS_IsEntityInsideShape(vehicle))
-			{
-				m_aVehiclesInside.Remove(i);
-				continue;
-			}
-
-			SCR_BaseCompartmentManagerComponent manager = GetCompartmentManager(vehicle);
-			if (!manager)
-			{
-				m_aVehiclesInside.Remove(i);
-				continue;
-			}
-
-			ProcessVehicleOccupants(manager);
-			ProcessVehicleTurrets(manager);
+			turretState.m_Operator = character;
+			ResetTurretWeaponState(turretState);
 		}
-	}
 
-	//------------------------------------------------------------------------------------------------
-	protected void ProcessVehicleOccupants(SCR_BaseCompartmentManagerComponent manager)
-	{
-		m_aOccupants.Clear();
-		manager.GetOccupants(m_aOccupants);
+		if (GetCombatDuration() > 0 && HasTurretFired(turretState))
+			ApplyCombatLock(characterState);
 
-		foreach (IEntity occupant : m_aOccupants)
-		{
-			ChimeraCharacter character = ChimeraCharacter.Cast(occupant);
-			if (!character)
-				continue;
-
-			BPS_CharacterState state = GetOrCreateCharacterState(character);
-			state.m_bVehicleInside = true;
-		}
-	}
-
-	// =============================================================================================
-	// TURRETS / MOUNTED WEAPONS
-	// =============================================================================================
-	protected void ProcessVehicleTurrets(SCR_BaseCompartmentManagerComponent manager)
-	{
-		m_aCompartments.Clear();
-		manager.GetCompartments(m_aCompartments);
-
-		foreach (BaseCompartmentSlot baseSlot : m_aCompartments)
-		{
-			ExtBaseCompartmentSlot slot = ExtBaseCompartmentSlot.Cast(baseSlot);
-			if (!slot)
-				continue;
-
-			TurretControllerComponent turret = slot.GetAttachedTurret();
-			if (!turret)
-				continue;
-
-			BPS_TurretWeaponState turretState = GetOrCreateTurretState(turret);
-			turretState.m_bSeen = true;
-
-			IEntity operator = slot.GetOccupant();
-			if (!operator || !ChimeraCharacter.Cast(operator))
-			{
-				ResetTurretWeaponState(turretState);
-				continue;
-			}
-
-			if (turretState.m_Operator != operator)
-			{
-				turretState.m_Operator = operator;
-				ResetTurretWeaponState(turretState);
-			}
-
-			if (!IsProtectedFaction(operator))
-				continue;
-
-			BPS_CharacterState operatorState = GetOrCreateCharacterState(operator);
-			if (!operatorState.IsInside())
-				continue;
-
-			if (HasTurretFired(turretState))
-				ApplyCombatLock(operatorState);
-		}
+		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -750,10 +675,18 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 				continue;
 			}
 
-			// Safety reconciliation for direct characters. This makes shape changes and
-			// edge crossings deterministic even if native trigger callbacks are delayed.
-			if (state.m_bDirectInside && !BPS_IsEntityInsideShape(state.m_Character))
-				state.m_bDirectInside = false;
+			// Reconcile using the same character + vehicle rule used by the presence pass.
+			// This avoids false exits for occupants whose character proxy sits outside the
+			// volume while the vehicle itself is still inside.
+			ChimeraCharacter character = ChimeraCharacter.Cast(state.m_Character);
+			if (!character)
+			{
+				m_aStates.Remove(i);
+				continue;
+			}
+
+			if (state.m_bInside && !BPS_IsCharacterInsideShape(character))
+				state.m_bInside = false;
 
 			bool inside = state.IsInside();
 
@@ -776,7 +709,10 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 
 			if (inside && IsProtectedFaction(state.m_Character))
 			{
-				if (GetCombatDuration() > 0 && HasPersonalWeaponFired(state))
+				// A turret is checked only for the player's current seat. If the seat has no
+				// attached turret, fall back to personal-weapon ammo tracking.
+				bool hasControlledTurret = ProcessCharacterTurret(state);
+				if (!hasControlledTurret && GetCombatDuration() > 0 && HasPersonalWeaponFired(state))
 					ApplyCombatLock(state);
 
 				ProcessCombatLockExpiration(state);
@@ -1080,7 +1016,7 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 		if (ChimeraCharacter.Cast(victim))
 			return ShouldBlockCharacterDamage(victim, damageContext);
 
-		if (GetCompartmentManager(victim))
+		if (Vehicle.Cast(victim))
 			return ShouldBlockVehicleDamage(victim, damageContext);
 
 		return false;
@@ -1124,7 +1060,7 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 		if (!m_FriendlyFireConfig.IsEnabled())
 			return false;
 
-		if (m_aVehiclesInside.Find(vehicle) < 0 || !BPS_IsEntityInsideShape(vehicle))
+		if (!BPS_IsEntityInsideShape(vehicle))
 			return false;
 
 		if (!IsProtectedFaction(vehicle))
@@ -1181,19 +1117,8 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	}
 
 	// =============================================================================================
-	// VEHICLE / FACTION HELPERS
+	// FACTION HELPERS
 	// =============================================================================================
-	protected SCR_BaseCompartmentManagerComponent GetCompartmentManager(IEntity ent)
-	{
-		if (!ent)
-			return null;
-
-		return SCR_BaseCompartmentManagerComponent.Cast(
-			ent.FindComponent(SCR_BaseCompartmentManagerComponent)
-		);
-	}
-
-	//------------------------------------------------------------------------------------------------
 	protected Faction GetEntityFactionForBPS(IEntity ent)
 	{
 		if (!ent)
@@ -1258,19 +1183,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 			return false;
 
 		return m_CampaignBase.IsHQ();
-	}
-
-	//------------------------------------------------------------------------------------------------
-	vector BPS_GetMapWorldPosition()
-	{
-		return GetOrigin();
-	}
-
-	//------------------------------------------------------------------------------------------------
-	float BPS_GetMapRadius()
-	{
-		// Compatibility helper. This is the real cylinder radius / square half-side.
-		return BPS_GetHorizontalSize() * 0.5;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1439,131 +1351,140 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	}
 
 	// =============================================================================================
-	// DEBUG VOLUME - RUNTIME + WORLD EDITOR
+	// DEBUG VOLUME - NATIVE ENFUSION SHAPES
 	// =============================================================================================
-	// Runtime uses ONE persistent Shape per safe zone. Workbench uses ONE ONCE Shape per editor
-	// frame. The previous implementation created one Shape for every line segment every frame,
-	// which caused thousands of native Shape allocations per second.
+	// Cylindrical uses Shape.CreateCylinder(). Square uses Shape.Create(ShapeType.BBOX).
+	// No manual 3D segment/triangle generation is performed by BPS.
+	//
+	// Both runtime and Workbench keep ONE persistent native Shape. Workbench only recreates it
+	// when a size/type/debug property changes; movement/rotation only updates SetMatrix().
 	protected ref Shape m_BPSRuntimeDebugShape;
-	protected vector m_BPSDebugLinePoints[208];
+#ifdef WORKBENCH
+	protected ref Shape m_BPSWorkbenchDebugShape;
+#endif
 
 	//------------------------------------------------------------------------------------------------
-	protected int BPS_BuildDebugLinePoints()
+	protected int BPS_GetDebugColor()
 	{
-		float halfHorizontal = BPS_GetHorizontalSize() * 0.5;
-		float halfHeight = BPS_GetHeight() * 0.5;
-		int count = 0;
-
-		if (m_eTriggerShapeType == BPS_ETriggerShapeType.Square)
-		{
-			vector corners[8];
-			corners[0] = Vector(-halfHorizontal, -halfHeight, -halfHorizontal);
-			corners[1] = Vector( halfHorizontal, -halfHeight, -halfHorizontal);
-			corners[2] = Vector( halfHorizontal, -halfHeight,  halfHorizontal);
-			corners[3] = Vector(-halfHorizontal, -halfHeight,  halfHorizontal);
-			corners[4] = Vector(-halfHorizontal,  halfHeight, -halfHorizontal);
-			corners[5] = Vector( halfHorizontal,  halfHeight, -halfHorizontal);
-			corners[6] = Vector( halfHorizontal,  halfHeight,  halfHorizontal);
-			corners[7] = Vector(-halfHorizontal,  halfHeight,  halfHorizontal);
-
-			// Bottom
-			m_BPSDebugLinePoints[count++] = corners[0]; m_BPSDebugLinePoints[count++] = corners[1];
-			m_BPSDebugLinePoints[count++] = corners[1]; m_BPSDebugLinePoints[count++] = corners[2];
-			m_BPSDebugLinePoints[count++] = corners[2]; m_BPSDebugLinePoints[count++] = corners[3];
-			m_BPSDebugLinePoints[count++] = corners[3]; m_BPSDebugLinePoints[count++] = corners[0];
-
-			// Top
-			m_BPSDebugLinePoints[count++] = corners[4]; m_BPSDebugLinePoints[count++] = corners[5];
-			m_BPSDebugLinePoints[count++] = corners[5]; m_BPSDebugLinePoints[count++] = corners[6];
-			m_BPSDebugLinePoints[count++] = corners[6]; m_BPSDebugLinePoints[count++] = corners[7];
-			m_BPSDebugLinePoints[count++] = corners[7]; m_BPSDebugLinePoints[count++] = corners[4];
-
-			// Verticals
-			m_BPSDebugLinePoints[count++] = corners[0]; m_BPSDebugLinePoints[count++] = corners[4];
-			m_BPSDebugLinePoints[count++] = corners[1]; m_BPSDebugLinePoints[count++] = corners[5];
-			m_BPSDebugLinePoints[count++] = corners[2]; m_BPSDebugLinePoints[count++] = corners[6];
-			m_BPSDebugLinePoints[count++] = corners[3]; m_BPSDebugLinePoints[count++] = corners[7];
-			return count;
-		}
-
-		for (int i = 0; i < BPS_DEBUG_CYLINDER_SEGMENTS; i++)
-		{
-			int next = (i + 1) % BPS_DEBUG_CYLINDER_SEGMENTS;
-			float angleA = (Math.PI2 * i) / BPS_DEBUG_CYLINDER_SEGMENTS;
-			float angleB = (Math.PI2 * next) / BPS_DEBUG_CYLINDER_SEGMENTS;
-
-			vector bottomA = Vector(Math.Cos(angleA) * halfHorizontal, -halfHeight, Math.Sin(angleA) * halfHorizontal);
-			vector bottomB = Vector(Math.Cos(angleB) * halfHorizontal, -halfHeight, Math.Sin(angleB) * halfHorizontal);
-			vector topA = Vector(Math.Cos(angleA) * halfHorizontal, halfHeight, Math.Sin(angleA) * halfHorizontal);
-			vector topB = Vector(Math.Cos(angleB) * halfHorizontal, halfHeight, Math.Sin(angleB) * halfHorizontal);
-
-			m_BPSDebugLinePoints[count++] = bottomA;
-			m_BPSDebugLinePoints[count++] = bottomB;
-			m_BPSDebugLinePoints[count++] = topA;
-			m_BPSDebugLinePoints[count++] = topB;
-
-			if ((i % 6) == 0)
-			{
-				m_BPSDebugLinePoints[count++] = bottomA;
-				m_BPSDebugLinePoints[count++] = topA;
-			}
-		}
-
-		return count;
+		// Native primitives contain solid faces. Keep alpha low and use NOOUTLINE so the engine's
+		// internal cylinder triangle mesh is not shown as visible triangle edges.
+		return Color.FromRGBA(0, 255, 70, 55).PackToInt();
 	}
 
 	//------------------------------------------------------------------------------------------------
-	protected Shape BPS_CreateDebugShape(bool once)
+	protected ShapeFlags BPS_GetDebugShapeFlags()
+	{
+		// Matches the native Reforger debug-volume approach: persistent, translucent,
+		// double-sided, additive and without mesh outlines.
+		return
+			ShapeFlags.VISIBLE |
+			ShapeFlags.NOZBUFFER |
+			ShapeFlags.TRANSP |
+			ShapeFlags.NOOUTLINE |
+			ShapeFlags.ADDITIVE |
+			ShapeFlags.DOUBLESIDE;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected void BPS_UpdateNativeDebugShapeTransform(Shape shape)
+	{
+		if (!shape)
+			return;
+
+		vector transform[4];
+
+		if (m_eTriggerShapeType == BPS_ETriggerShapeType.Cylindrical)
+		{
+			// IMPORTANT:
+			// In actual Arma Reforger usage Shape.CreateCylinder is already used as a
+			// vertical (world-Y) primitive. Applying the previous manual axis remap
+			// rotated the native cylinder onto its side.
+			//
+			// Keep the native orientation and update translation only. A cylinder is
+			// rotationally symmetric around its vertical axis, so entity yaw is irrelevant.
+			Math3D.MatrixIdentity4(transform);
+			transform[3] = GetOrigin();
+		}
+		else
+		{
+			// Square safe zones must preserve entity orientation (especially yaw).
+			GetWorldTransform(transform);
+		}
+
+		shape.SetMatrix(transform);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected Shape BPS_CreateNativeCylinderDebugShape()
+	{
+		Shape shape = Shape.CreateCylinder(
+			BPS_GetDebugColor(),
+			BPS_GetDebugShapeFlags(),
+			vector.Zero,
+			BPS_GetHorizontalSize() * 0.5,
+			BPS_GetHeight()
+		);
+
+		if (!shape)
+			return null;
+
+		BPS_UpdateNativeDebugShapeTransform(shape);
+		return shape;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected Shape BPS_CreateNativeBoxDebugShape()
+	{
+		float halfHorizontal = BPS_GetHorizontalSize() * 0.5;
+		float halfHeight = BPS_GetHeight() * 0.5;
+
+		Shape shape = Shape.Create(
+			ShapeType.BBOX,
+			BPS_GetDebugColor(),
+			BPS_GetDebugShapeFlags(),
+			Vector(-halfHorizontal, -halfHeight, -halfHorizontal),
+			Vector( halfHorizontal,  halfHeight,  halfHorizontal)
+		);
+
+		if (!shape)
+			return null;
+
+		BPS_UpdateNativeDebugShapeTransform(shape);
+		return shape;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected Shape BPS_CreateNativeDebugShape()
 	{
 		if (!m_bShowDebugShape)
 			return null;
 
-		int pointCount = BPS_BuildDebugLinePoints();
-		if (pointCount <= 0)
-			return null;
+		if (m_eTriggerShapeType == BPS_ETriggerShapeType.Square)
+			return BPS_CreateNativeBoxDebugShape();
 
-		Color debugColor = Color.FromRGBA(0, 255, 70, 220);
-		int color = debugColor.PackToInt();
-
-		ShapeFlags flags = ShapeFlags.NOZBUFFER | ShapeFlags.TRANSP;
-		if (once)
-			flags |= ShapeFlags.ONCE;
-		else
-			flags |= ShapeFlags.VISIBLE;
-
-		Shape shape = Shape.CreateLines(color, flags, m_BPSDebugLinePoints, pointCount);
-		if (!shape)
-			return null;
-
-		vector transform[4];
-		GetWorldTransform(transform);
-		shape.SetMatrix(transform);
-		return shape;
+		return BPS_CreateNativeCylinderDebugShape();
 	}
 
 	//------------------------------------------------------------------------------------------------
 	protected void BPS_CreateRuntimeDebugShape()
 	{
-		// Dedicated server / console mode has no renderer. Most importantly, no FRAME event is
-		// registered anywhere, so debug has zero per-frame server callback cost.
-		if (!m_bShowDebugShape)
-		{
-			BPS_DestroyRuntimeDebugShape();
-			return;
-		}
+		BPS_DestroyRuntimeDebugShape();
 
+		if (!m_bShowDebugShape)
+			return;
+
+		// Dedicated/console applications have no renderer. There is no FRAME event in this entity,
+		// so debug visualization contributes no per-frame callback on the dedicated server.
 		if (System.IsConsoleApp())
 			return;
 
 #ifdef WORKBENCH
-		// In Tools edit mode the Workbench callback below owns the preview. Only create the
-		// persistent runtime shape when actually running the game.
+		// Edit mode owns a separate Workbench preview Shape.
 		if (!GetGame() || !GetGame().InPlayMode())
 			return;
 #endif
 
-		BPS_DestroyRuntimeDebugShape();
-		m_BPSRuntimeDebugShape = BPS_CreateDebugShape(false);
+		m_BPSRuntimeDebugShape = BPS_CreateNativeDebugShape();
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1578,6 +1499,30 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 
 #ifdef WORKBENCH
 	//------------------------------------------------------------------------------------------------
+	protected void BPS_DestroyWorkbenchDebugShape()
+	{
+		if (!m_BPSWorkbenchDebugShape)
+			return;
+
+		delete m_BPSWorkbenchDebugShape;
+		m_BPSWorkbenchDebugShape = null;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected void BPS_RebuildWorkbenchDebugShape()
+	{
+		BPS_DestroyWorkbenchDebugShape();
+
+		if (!m_bShowDebugShape)
+			return;
+
+		if (GetGame() && GetGame().InPlayMode())
+			return;
+
+		m_BPSWorkbenchDebugShape = BPS_CreateNativeDebugShape();
+	}
+
+	//------------------------------------------------------------------------------------------------
 	override void _WB_OnInit(inout vector mat[4], IEntitySource src)
 	{
 		super._WB_OnInit(mat, src);
@@ -1590,64 +1535,77 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 			BPS_WBSyncChangedProperty(src, "m_fHeight");
 		if (src)
 			BPS_WBSyncChangedProperty(src, "m_bShowDebugShape");
+
+		BPS_RebuildWorkbenchDebugShape();
 	}
 
 	//------------------------------------------------------------------------------------------------
 	override bool _WB_OnKeyChanged(BaseContainer src, string key, BaseContainerList ownerContainers, IEntity parent)
 	{
-		// Read only the property Workbench says changed. This is the same pattern used by
-		// vanilla editor entities and works continuously while dragging sliders.
-		BPS_WBSyncChangedProperty(src, key);
-
-		// If a property is edited while Play Mode is active, rebuild the one persistent
-		// runtime shape once. There is still no per-frame entity event.
-		if (GetGame() && GetGame().InPlayMode())
-			BPS_CreateRuntimeDebugShape();
+		// Rebuild the native debug primitive only when one of its own properties changed.
+		// Editing messages, colors or other BPS configuration no longer reallocates the Shape.
+		if (BPS_WBSyncChangedProperty(src, key))
+		{
+			if (GetGame() && GetGame().InPlayMode())
+				BPS_CreateRuntimeDebugShape();
+			else
+				BPS_RebuildWorkbenchDebugShape();
+		}
 
 		return super._WB_OnKeyChanged(src, key, ownerContainers, parent);
 	}
 
 	//------------------------------------------------------------------------------------------------
-	protected void BPS_WBSyncChangedProperty(BaseContainer src, string key)
+	protected bool BPS_WBSyncChangedProperty(BaseContainer src, string key)
 	{
 		if (!src)
-			return;
+			return false;
 
 		if (key == "m_eTriggerShapeType")
 		{
 			int shapeTypeValue;
-			if (src.Get(key, shapeTypeValue))
-			{
-				if (shapeTypeValue == BPS_ETriggerShapeType.Square)
-					m_eTriggerShapeType = BPS_ETriggerShapeType.Square;
-				else
-					m_eTriggerShapeType = BPS_ETriggerShapeType.Cylindrical;
-			}
-			return;
+			if (!src.Get(key, shapeTypeValue))
+				return false;
+
+			if (shapeTypeValue == BPS_ETriggerShapeType.Square)
+				m_eTriggerShapeType = BPS_ETriggerShapeType.Square;
+			else
+				m_eTriggerShapeType = BPS_ETriggerShapeType.Cylindrical;
+
+			return true;
 		}
 
 		if (key == "m_fHorizontalSize")
 		{
 			float horizontalSizeValue;
-			if (src.Get(key, horizontalSizeValue))
-				m_fHorizontalSize = horizontalSizeValue;
-			return;
+			if (!src.Get(key, horizontalSizeValue))
+				return false;
+
+			m_fHorizontalSize = horizontalSizeValue;
+			return true;
 		}
 
 		if (key == "m_fHeight")
 		{
 			float heightValue;
-			if (src.Get(key, heightValue))
-				m_fHeight = heightValue;
-			return;
+			if (!src.Get(key, heightValue))
+				return false;
+
+			m_fHeight = heightValue;
+			return true;
 		}
 
 		if (key == "m_bShowDebugShape")
 		{
 			bool showDebugValue;
-			if (src.Get(key, showDebugValue))
-				m_bShowDebugShape = showDebugValue;
+			if (!src.Get(key, showDebugValue))
+				return false;
+
+			m_bShowDebugShape = showDebugValue;
+			return true;
 		}
+
+		return false;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1659,15 +1617,23 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	//------------------------------------------------------------------------------------------------
 	override void _WB_AfterWorldUpdate(float timeSlice)
 	{
-		// When Play Mode is running, the persistent runtime shape is used instead.
 		if (GetGame() && GetGame().InPlayMode())
 			return;
 
 		if (!m_bShowDebugShape)
+		{
+			BPS_DestroyWorkbenchDebugShape();
 			return;
+		}
 
-		// ONE native Shape allocation per editor frame, not one allocation per segment.
-		BPS_CreateDebugShape(true);
+		if (!m_BPSWorkbenchDebugShape)
+		{
+			BPS_RebuildWorkbenchDebugShape();
+			return;
+		}
+
+		// Moving/rotating the entity requires only a matrix update; no Shape allocation.
+		BPS_UpdateNativeDebugShapeTransform(m_BPSWorkbenchDebugShape);
 	}
 #endif
 
@@ -1677,6 +1643,9 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	void ~BPS_SafeZoneTriggerEntity()
 	{
 		BPS_DestroyRuntimeDebugShape();
+#ifdef WORKBENCH
+		BPS_DestroyWorkbenchDebugShape();
+#endif
 
 		if (GetGame())
 		{

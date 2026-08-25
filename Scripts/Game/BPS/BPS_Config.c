@@ -40,7 +40,7 @@ class BPS_FriendlyMessagesConfig
 [BaseContainerProps(configRoot: true)]
 class BPS_IntruderConfig
 {
-	[Attribute("10", UIWidgets.EditBox, "Seconds an enemy can remain inside before being killed.")]
+	[Attribute("20", UIWidgets.EditBox, "Seconds an enemy can remain inside before being killed.")]
 	int m_iKillDelaySeconds;
 
 	[Attribute("1.1", UIWidgets.EditBox, "Countdown message duration.")]
