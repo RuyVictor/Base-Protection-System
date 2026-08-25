@@ -4,6 +4,20 @@ SCR_GameModeCampaign GameMode_Campaign1 : "{3B230AAC5252108F}Prefabs/MP/Modes/Co
 SCR_CampaignFactionManager CampaignFactionManager1 : "{F1AC26310BAE3788}Prefabs/MP/Campaign/CampaignFactionManager.et" {
  coords 0 1 0
 }
+BPS_SafeZoneTriggerEntity {
+ coords 136.826 16.229 110.72
+ m_fHorizontalSize 100
+ m_FriendlyMessages BPS_FriendlyMessagesConfig "{6A3213EFE62102FE}" {
+ }
+ m_IntruderConfig BPS_IntruderConfig "{6A3213EFE6B70E35}" {
+ }
+ m_CombatConfig BPS_CombatConfig "{6A3213EFE12B7335}" {
+ }
+ m_FriendlyFireConfig BPS_FriendlyFireConfig "{6A3213EFE1D1AB9C}" {
+ }
+ m_MapDisplayConfig BPS_MapDisplayConfig "{6A3213EFE055C41D}" {
+ }
+}
 GenericEntity : "{1391CE8C0E255636}Prefabs/Systems/MilitaryBase/ConflictMilitaryBase.et" {
  components {
   SCR_CampaignMilitaryBaseMapDescriptorComponent "{6A264876144FE158}" {
@@ -21,23 +35,6 @@ GenericEntity : "{1391CE8C0E255636}Prefabs/Systems/MilitaryBase/ConflictMilitary
   }
  }
  coords 139.694 1 121.532
- {
-  BPS_SafeZoneTriggerEntity {
-   TriggerShapeType Sphere
-   SphereRadius 10
-   DrawShape 1
-   m_FriendlyMessages BPS_FriendlyMessagesConfig "{6A264876F48B6AC4}" {
-   }
-   m_IntruderConfig BPS_IntruderConfig "{6A264876F749514D}" {
-   }
-   m_CombatConfig BPS_CombatConfig "{6A264876F7D0F83F}" {
-   }
-   m_FriendlyFireConfig BPS_FriendlyFireConfig "{6A264876F6419911}" {
-   }
-   m_MapDisplayConfig BPS_MapDisplayConfig "{6A264876F6B0AA7D}" {
-   }
-  }
- }
 }
 SCR_LoadoutManager : "{58FBD035E53D95C1}Prefabs/MP/Campaign/CampaignLoadoutManager.et" {
  coords 135.648 1 117.868
