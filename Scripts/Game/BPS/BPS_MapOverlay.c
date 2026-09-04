@@ -1,9 +1,16 @@
 //------------------------------------------------------------------------------------------------
 // BPS - Base Protection System
-// Map Safe Zone boundary rendering for CYLINDER and SQUARE trigger shapes.
+// Map Safe Zone boundary rendering.
+//
+// Uses a client-side CanvasWidget so the boundary can have:
+// - solid background/fill color
+// - configurable border color
+// - configurable border thickness
 //------------------------------------------------------------------------------------------------
 modded class SCR_MapEntity
 {
+	protected static const int BPS_MAP_CIRCLE_SEGMENTS = 96;
+
 	protected CanvasWidget m_BPSOverlayCanvas;
 
 	protected ref array<ref CanvasWidgetCommand> m_aBPSDrawCommands =
@@ -11,9 +18,6 @@ modded class SCR_MapEntity
 
 	protected ref array<BPS_SafeZoneTriggerEntity> m_aBPSMapZones =
 		new array<BPS_SafeZoneTriggerEntity>();
-
-	protected ref array<vector> m_aBPSWorldOutline =
-		new array<vector>();
 
 	//------------------------------------------------------------------------------------------------
 	override void EOnFrame(IEntity owner, float timeSlice)
@@ -52,7 +56,6 @@ modded class SCR_MapEntity
 			if (mapParent)
 				overlayParent = mapParent;
 
-			// Keep BPS one layer above the native map but below spawn buttons/text.
 			overlayZOrder = mapWidget.GetZOrder() + 1;
 		}
 
@@ -97,38 +100,39 @@ modded class SCR_MapEntity
 		m_aBPSDrawCommands.Clear();
 		BPS_SafeZoneTriggerEntity.BPS_CopyMapZones(m_aBPSMapZones);
 
+		float pixelsPerMeter = GetCurrentZoom();
+
 		foreach (BPS_SafeZoneTriggerEntity zone : m_aBPSMapZones)
 		{
-			if (!zone || !zone.BPS_ShouldShowMapBoundary())
+			if (!zone)
 				continue;
 
-			m_aBPSWorldOutline.Clear();
-			zone.BPS_BuildMapWorldOutline(m_aBPSWorldOutline);
+			if (!zone.BPS_ShouldShowMapBoundary())
+				continue;
 
-			if (m_aBPSWorldOutline.Count() < 3)
+			vector worldPos = zone.BPS_GetMapWorldPosition();
+			int screenX;
+			int screenY;
+
+			WorldToScreen(
+				worldPos[0],
+				worldPos[2],
+				screenX,
+				screenY,
+				true
+			);
+
+			float radiusPx = zone.BPS_GetMapRadius() * pixelsPerMeter;
+			if (radiusPx <= 0)
 				continue;
 
 			ref array<float> vertices = new array<float>();
-
-			foreach (vector worldPoint : m_aBPSWorldOutline)
-			{
-				int screenX;
-				int screenY;
-
-				WorldToScreen(
-					worldPoint[0],
-					worldPoint[2],
-					screenX,
-					screenY,
-					true
-				);
-
-				vertices.Insert(screenX);
-				vertices.Insert(screenY);
-			}
-
-			if (vertices.Count() < 6)
-				continue;
+			m_BPSOverlayCanvas.TessellateCircle(
+				Vector(screenX, screenY, 0),
+				radiusPx,
+				BPS_MAP_CIRCLE_SEGMENTS,
+				vertices
+			);
 
 			ref PolygonDrawCommand fillCommand = new PolygonDrawCommand();
 			fillCommand.m_Vertices = vertices;

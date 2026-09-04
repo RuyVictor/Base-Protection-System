@@ -2,13 +2,10 @@
 // BPS - Base Protection System
 // Safe Zone geometry: CYLINDER or SQUARE.
 //
-// Uses GenericEntity with explicit mathematical volume checks, so no native sphere-trigger properties are exposed.
-// The real gameplay boundary is always validated by BPS_IsWorldPositionInsideShape().
-// Debug visualization uses native Enfusion Shape primitives: CreateCylinder and BBOX.
-// Native cylinder orientation is kept untouched (vertical in actual Reforger usage).
-// Legacy compatibility helpers and obsolete vehicle-inside state have been removed.
+// Runtime gameplay checks use explicit mathematical volumes. Presence is refreshed from
+// PlayerManager + AIWorld, never from QueryEntitiesBySphere. This keeps bot support without
+// reintroducing a world-entity scan.
 //------------------------------------------------------------------------------------------------
-
 enum BPS_ETriggerShapeType
 {
 	Cylindrical = 0,
@@ -16,10 +13,17 @@ enum BPS_ETriggerShapeType
 }
 
 //------------------------------------------------------------------------------------------------
+enum BPS_EVehicleRelation
+{
+	Unknown = 0,
+	Friendly = 1,
+	Enemy = 2
+}
+
+//------------------------------------------------------------------------------------------------
 class BPS_CharacterState
 {
 	IEntity m_Character;
-
 	bool m_bInside;
 	bool m_bWasInside;
 
@@ -51,6 +55,38 @@ class BPS_CharacterState
 	bool IsInside()
 	{
 		return m_bInside;
+	}
+}
+
+//------------------------------------------------------------------------------------------------
+class BPS_VehicleState
+{
+	IEntity m_Vehicle;
+	bool m_bInside;
+	bool m_bSeenThisPresencePass;
+	BPS_EVehicleRelation m_eRelation;
+	int m_iIntruderStartTime;
+	int m_iLastIntruderSecond;
+
+	void BPS_VehicleState(IEntity vehicle)
+	{
+		m_Vehicle = vehicle;
+		m_bInside = false;
+		m_bSeenThisPresencePass = false;
+		m_eRelation = BPS_EVehicleRelation.Unknown;
+		m_iIntruderStartTime = -1;
+		m_iLastIntruderSecond = -1;
+	}
+
+	bool IsIntruderActive()
+	{
+		return m_iIntruderStartTime >= 0;
+	}
+
+	void ResetIntruder()
+	{
+		m_iIntruderStartTime = -1;
+		m_iLastIntruderSecond = -1;
 	}
 }
 
@@ -92,7 +128,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	protected static const int BPS_LOGIC_INTERVAL_MS = 100;
 	protected static const int BPS_PRESENCE_INTERVAL_MS = 500;
 	protected static const int BPS_FACTION_CHECK_INTERVAL_MS = 1000;
-	// Only the 2D map outline needs polygon segmentation. The 3D debug volume uses native shapes.
 	protected static const int BPS_MAP_CYLINDER_SEGMENTS = 32;
 
 	// =============================================================================================
@@ -149,7 +184,7 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	ref BPS_MapDisplayConfig m_MapDisplayConfig;
 
 	// =============================================================================================
-	// CAMPAIGN / REGISTRIES
+	// CAMPAIGN / REGISTRIES / RUNTIME STATE
 	// =============================================================================================
 	protected SCR_CampaignMilitaryBaseComponent m_CampaignBase;
 	protected FactionKey m_sLastBaseFactionKey;
@@ -161,8 +196,12 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	protected static ref array<BPS_SafeZoneTriggerEntity> s_aMapZones = new array<BPS_SafeZoneTriggerEntity>();
 
 	protected ref array<ref BPS_CharacterState> m_aStates = new array<ref BPS_CharacterState>();
-	protected ref array<int> m_aPlayerIds = new array<int>();
+	protected ref array<ref BPS_VehicleState> m_aVehicleStates = new array<ref BPS_VehicleState>();
 	protected ref array<ref BPS_TurretWeaponState> m_aTurretStates = new array<ref BPS_TurretWeaponState>();
+
+	protected ref array<int> m_aPlayerIds = new array<int>();
+	protected ref array<AIAgent> m_aAIAgents = new array<AIAgent>();
+	protected ref array<IEntity> m_aVehicleOccupants = new array<IEntity>();
 
 	// =============================================================================================
 	// INIT
@@ -170,7 +209,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	void BPS_SafeZoneTriggerEntity(IEntitySource src, IEntity parent)
 	{
 		SetFlags(EntityFlags.ACTIVE);
-		// IMPORTANT: no FRAME event. Runtime debug uses one persistent Shape instead.
 		SetEventMask(EntityEvent.INIT);
 	}
 
@@ -178,9 +216,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	override void EOnInit(IEntity owner)
 	{
 		EnsureConfig();
-
-		// Client/rendering instances get a single persistent debug shape. Dedicated
-		// servers are rejected inside BPS_CreateRuntimeDebugShape().
 		BPS_CreateRuntimeDebugShape();
 
 		if (s_aMapZones.Find(this) < 0)
@@ -254,8 +289,8 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	{
 		vector transform[4];
 		GetWorldTransform(transform);
-
 		vector localPosition = worldPosition.InvMultiply4(transform);
+
 		float halfHorizontal = BPS_GetHorizontalSize() * 0.5;
 		float halfHeight = BPS_GetHeight() * 0.5;
 
@@ -284,6 +319,35 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 			return false;
 
 		return BPS_IsWorldPositionInsideShape(ent.GetOrigin());
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected bool BPS_IsCharacterInsideShape(ChimeraCharacter character)
+	{
+		if (!character)
+			return false;
+
+		if (BPS_IsEntityInsideShape(character))
+			return true;
+
+		IEntity vehicle = BPS_GetCharacterVehicle(character);
+		if (!vehicle)
+			return false;
+
+		return BPS_IsEntityInsideShape(vehicle);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected IEntity BPS_GetCharacterVehicle(ChimeraCharacter character)
+	{
+		if (!character)
+			return null;
+
+		CompartmentAccessComponent access = character.GetCompartmentAccessComponent();
+		if (!access || !access.IsInCompartment())
+			return null;
+
+		return CompartmentAccessComponent.GetVehicleIn(character);
 	}
 
 	// =============================================================================================
@@ -324,65 +388,116 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	}
 
 	// =============================================================================================
-	// PLAYER PRESENCE - NO WORLD QUERY
+	// PRESENCE - HUMAN PLAYERS + AI, NO WORLD QUERY
 	// =============================================================================================
-	// The BPS only needs to track human players for enter/exit, intrusion and combat lock.
-	// Iterating PlayerManager is bounded by connected player count (for example 128) and avoids
-	// QueryEntitiesBySphere scanning every nearby dynamic entity. Empty vehicle protection is
-	// evaluated directly when that vehicle receives damage, so vehicles do not need polling.
 	protected void BPS_RefreshPresence()
 	{
 		foreach (BPS_CharacterState state : m_aStates)
 		{
 			if (state)
-			{
 				state.m_bInside = false;
-			}
+		}
+
+		foreach (BPS_VehicleState vehicleState : m_aVehicleStates)
+		{
+			if (vehicleState)
+				vehicleState.m_bSeenThisPresencePass = false;
 		}
 
 		PlayerManager playerManager = GetGame().GetPlayerManager();
-		if (!playerManager)
-			return;
-
-		m_aPlayerIds.Clear();
-		playerManager.GetPlayers(m_aPlayerIds);
-
-		foreach (int playerId : m_aPlayerIds)
+		if (playerManager)
 		{
-			IEntity controlled = playerManager.GetPlayerControlledEntity(playerId);
-			ChimeraCharacter character = ChimeraCharacter.Cast(controlled);
-			if (!character)
-				continue;
+			m_aPlayerIds.Clear();
+			playerManager.GetPlayers(m_aPlayerIds);
 
-			if (!BPS_IsCharacterInsideShape(character))
-				continue;
+			foreach (int playerId : m_aPlayerIds)
+			{
+				IEntity controlled = playerManager.GetPlayerControlledEntity(playerId);
+				ChimeraCharacter character = ChimeraCharacter.Cast(controlled);
+				if (!character)
+					continue;
 
-			BPS_CharacterState state = GetOrCreateCharacterState(character);
-			state.m_bInside = true;
+				BPS_ProcessPresenceCharacter(character);
+			}
 		}
+
+		AIWorld aiWorld = GetGame().GetAIWorld();
+		if (aiWorld)
+		{
+			m_aAIAgents.Clear();
+			aiWorld.GetAIAgents(m_aAIAgents);
+
+			foreach (AIAgent agent : m_aAIAgents)
+			{
+				if (!agent)
+					continue;
+
+				ChimeraCharacter character = ChimeraCharacter.Cast(agent.GetControlledEntity());
+				if (!character)
+					continue;
+
+				BPS_ProcessPresenceCharacter(character);
+			}
+		}
+
+		BPS_RefreshTrackedVehiclePresence();
 	}
 
 	//------------------------------------------------------------------------------------------------
-	protected bool BPS_IsCharacterInsideShape(ChimeraCharacter character)
+	protected void BPS_ProcessPresenceCharacter(ChimeraCharacter character)
 	{
 		if (!character)
-			return false;
+			return;
 
-		// On foot (and most vehicle seats), character origin is enough.
-		if (BPS_IsEntityInsideShape(character))
-			return true;
+		if (BPS_IsCharacterInsideShape(character))
+		{
+			BPS_CharacterState state = GetOrCreateCharacterState(character);
+			state.m_bInside = true;
+		}
 
-		// Preserve the previous BPS vehicle semantic: if the vehicle root is inside the zone,
-		// its occupant is treated as inside even when the character proxy/origin is offset.
-		CompartmentAccessComponent access = character.GetCompartmentAccessComponent();
-		if (!access || !access.IsInCompartment())
-			return false;
-
-		IEntity vehicle = CompartmentAccessComponent.GetVehicleIn(character);
+		IEntity vehicle = BPS_GetCharacterVehicle(character);
 		if (!vehicle)
-			return false;
+			return;
 
-		return BPS_IsEntityInsideShape(vehicle);
+		BPS_VehicleState vehicleState = FindVehicleState(vehicle);
+		bool vehicleInside = BPS_IsEntityInsideShape(vehicle);
+
+		if (!vehicleState && !vehicleInside)
+			return;
+
+		if (!vehicleState)
+			vehicleState = GetOrCreateVehicleState(vehicle);
+
+		if (vehicleState.m_bSeenThisPresencePass)
+			return;
+
+		vehicleState.m_bSeenThisPresencePass = true;
+		vehicleState.m_bInside = vehicleInside;
+		vehicleState.m_eRelation = BPS_GetVehicleRelation(vehicle);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected void BPS_RefreshTrackedVehiclePresence()
+	{
+		for (int i = m_aVehicleStates.Count() - 1; i >= 0; i--)
+		{
+			BPS_VehicleState state = m_aVehicleStates[i];
+			if (!state || !state.m_Vehicle)
+			{
+				m_aVehicleStates.Remove(i);
+				continue;
+			}
+
+			SCR_DamageManagerComponent damageManager = SCR_DamageManagerComponent.GetDamageManager(state.m_Vehicle);
+			if (damageManager && damageManager.IsDestroyed())
+			{
+				m_aVehicleStates.Remove(i);
+				continue;
+			}
+
+			state.m_bInside = BPS_IsEntityInsideShape(state.m_Vehicle);
+			state.m_eRelation = BPS_GetVehicleRelation(state.m_Vehicle);
+		}
 	}
 
 	// =============================================================================================
@@ -414,6 +529,9 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 				turretState.m_bSeen = false;
 		}
 
+		// Vehicle intruders are processed before characters so the vehicle destruction is the
+		// authoritative result when both timers expire on the same tick.
+		ProcessVehicles();
 		ProcessCharacters();
 		CleanupTurretStates();
 	}
@@ -444,12 +562,21 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 
 		foreach (BPS_CharacterState state : m_aStates)
 		{
-			if (!state || !state.IsInside())
+			if (!state)
 				continue;
 
 			ResetIntruder(state);
 			state.m_iCombatLockStartTime = -1;
 			state.m_bWasInside = false;
+		}
+
+		foreach (BPS_VehicleState vehicleState : m_aVehicleStates)
+		{
+			if (!vehicleState)
+				continue;
+
+			vehicleState.ResetIntruder();
+			vehicleState.m_eRelation = BPS_GetVehicleRelation(vehicleState.m_Vehicle);
 		}
 	}
 
@@ -493,7 +620,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 		if (s_aZones.Find(this) < 0)
 			s_aZones.Insert(this);
 
-
 		if (GetGame() && GetGame().GetCallqueue())
 		{
 			GetGame().GetCallqueue().CallLater(
@@ -534,10 +660,315 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	}
 
 	// =============================================================================================
-	// TURRET / MOUNTED WEAPON - CURRENT PLAYER SEAT ONLY
+	// VEHICLE RELATION / STATE
 	// =============================================================================================
-	// Instead of scanning every compartment of every vehicle in the safe zone, inspect only the
-	// compartment occupied by each protected player that is currently inside.
+	protected SCR_BaseCompartmentManagerComponent BPS_GetVehicleCompartmentManager(IEntity vehicle)
+	{
+		if (!vehicle)
+			return null;
+
+		IEntity current = vehicle;
+		for (int depth = 0; current && depth < 4; depth++)
+		{
+			SCR_BaseCompartmentManagerComponent manager = SCR_BaseCompartmentManagerComponent.Cast(
+				current.FindComponent(SCR_BaseCompartmentManagerComponent)
+			);
+
+			if (manager)
+				return manager;
+
+			current = current.GetParent();
+		}
+
+		return null;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected bool BPS_IsFactionProtected(Faction faction)
+	{
+		if (!faction)
+			return false;
+
+		Faction protectedFaction = GetProtectedFaction();
+		if (!protectedFaction)
+			return false;
+
+		if (faction.GetFactionKey() == protectedFaction.GetFactionKey())
+			return true;
+
+		return protectedFaction.IsFactionFriendly(faction);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected bool BPS_IsFactionEnemy(Faction faction)
+	{
+		if (!faction)
+			return false;
+
+		Faction protectedFaction = GetProtectedFaction();
+		if (!protectedFaction)
+			return false;
+
+		if (faction.GetFactionKey() == protectedFaction.GetFactionKey())
+			return false;
+
+		return protectedFaction.IsFactionEnemy(faction);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected BPS_EVehicleRelation BPS_GetVehicleRelation(IEntity vehicle)
+	{
+		if (!vehicle)
+			return BPS_EVehicleRelation.Unknown;
+
+		bool hasFriendlyOccupant = false;
+		bool hasEnemyOccupant = false;
+
+		SCR_BaseCompartmentManagerComponent compartmentManager = BPS_GetVehicleCompartmentManager(vehicle);
+		if (compartmentManager)
+		{
+			m_aVehicleOccupants.Clear();
+			compartmentManager.GetOccupants(m_aVehicleOccupants);
+
+			foreach (IEntity occupant : m_aVehicleOccupants)
+			{
+				if (!occupant)
+					continue;
+
+				Faction occupantFaction = GetEntityFactionForBPS(occupant);
+				if (!occupantFaction)
+					continue;
+
+				if (BPS_IsFactionProtected(occupantFaction))
+				{
+					hasFriendlyOccupant = true;
+					continue;
+				}
+
+				if (BPS_IsFactionEnemy(occupantFaction))
+					hasEnemyOccupant = true;
+			}
+		}
+
+		// Safety first: never destroy a vehicle while a protected/friendly occupant is inside.
+		if (hasFriendlyOccupant)
+			return BPS_EVehicleRelation.Friendly;
+
+		if (hasEnemyOccupant)
+			return BPS_EVehicleRelation.Enemy;
+
+		// Empty vehicle (or a prefab without accessible occupants): use its faction affiliation.
+		Faction vehicleFaction = GetEntityFactionForBPS(vehicle);
+		if (!vehicleFaction)
+			return BPS_EVehicleRelation.Unknown;
+
+		if (BPS_IsFactionProtected(vehicleFaction))
+			return BPS_EVehicleRelation.Friendly;
+
+		if (BPS_IsFactionEnemy(vehicleFaction))
+			return BPS_EVehicleRelation.Enemy;
+
+		return BPS_EVehicleRelation.Unknown;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected BPS_VehicleState GetOrCreateVehicleState(IEntity vehicle)
+	{
+		BPS_VehicleState existing = FindVehicleState(vehicle);
+		if (existing)
+			return existing;
+
+		BPS_VehicleState state = new BPS_VehicleState(vehicle);
+		m_aVehicleStates.Insert(state);
+		return state;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected BPS_VehicleState FindVehicleState(IEntity vehicle)
+	{
+		foreach (BPS_VehicleState state : m_aVehicleStates)
+		{
+			if (state && state.m_Vehicle == vehicle)
+				return state;
+		}
+
+		return null;
+	}
+
+	// =============================================================================================
+	// ENEMY VEHICLE INTRUSION - ONE COUNTDOWN PER VEHICLE
+	// =============================================================================================
+	protected void ProcessVehicles()
+	{
+		for (int i = m_aVehicleStates.Count() - 1; i >= 0; i--)
+		{
+			BPS_VehicleState state = m_aVehicleStates[i];
+			if (!state || !state.m_Vehicle)
+			{
+				m_aVehicleStates.Remove(i);
+				continue;
+			}
+
+			SCR_DamageManagerComponent damageManager = SCR_DamageManagerComponent.GetDamageManager(state.m_Vehicle);
+			if (damageManager && damageManager.IsDestroyed())
+			{
+				m_aVehicleStates.Remove(i);
+				continue;
+			}
+
+			// Exact geometry is reconciled every logic tick. Presence discovery/faction classification
+			// stays at 500 ms. Only an ACTIVE enemy countdown re-checks occupant relation at 100 ms,
+			// avoiding repeated compartment scans for every friendly vehicle in the zone.
+			state.m_bInside = BPS_IsEntityInsideShape(state.m_Vehicle);
+			if (state.IsIntruderActive())
+				state.m_eRelation = BPS_GetVehicleRelation(state.m_Vehicle);
+
+			if (!state.m_bInside)
+			{
+				if (state.IsIntruderActive())
+				{
+					PrintFormat("[BPS] ENEMY VEHICLE LEFT SAFE ZONE - COUNTDOWN CANCELLED | Vehicle=%1", state.m_Vehicle);
+					state.ResetIntruder();
+				}
+
+				// Keep nothing for an unoccupied/unseen vehicle once it is outside.
+				if (!state.m_bSeenThisPresencePass)
+					m_aVehicleStates.Remove(i);
+
+				continue;
+			}
+
+			if (state.m_eRelation != BPS_EVehicleRelation.Enemy)
+			{
+				if (state.IsIntruderActive())
+				{
+					PrintFormat("[BPS] VEHICLE IS NO LONGER ENEMY - COUNTDOWN CANCELLED | Vehicle=%1", state.m_Vehicle);
+					state.ResetIntruder();
+				}
+
+				// Friendly/neutral empty vehicles do not need a persistent timer state. Vehicle
+				// damage protection is evaluated directly when damage arrives.
+				if (!state.m_bSeenThisPresencePass)
+					m_aVehicleStates.Remove(i);
+
+				continue;
+			}
+
+			if (!state.IsIntruderActive())
+				StartVehicleIntruder(state);
+
+			ProcessVehicleIntruder(state);
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected void StartVehicleIntruder(BPS_VehicleState state)
+	{
+		if (!state || !state.m_Vehicle)
+			return;
+
+		state.m_iIntruderStartTime = System.GetTickCount();
+		state.m_iLastIntruderSecond = GetIntruderDelay();
+
+		PrintFormat(
+			"[BPS] ENEMY VEHICLE ENTERED SAFE ZONE | Vehicle=%1 | Countdown=%2s",
+			state.m_Vehicle,
+			GetIntruderDelay()
+		);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected void ProcessVehicleIntruder(BPS_VehicleState state)
+	{
+		if (!state || !state.m_Vehicle || !state.IsIntruderActive())
+			return;
+
+		// Validate both conditions again at the precise timer tick.
+		if (!BPS_IsEntityInsideShape(state.m_Vehicle))
+		{
+			state.ResetIntruder();
+			return;
+		}
+
+		if (BPS_GetVehicleRelation(state.m_Vehicle) != BPS_EVehicleRelation.Enemy)
+		{
+			state.ResetIntruder();
+			return;
+		}
+
+		int elapsed = System.GetTickCount(state.m_iIntruderStartTime);
+		int total = GetIntruderDelay() * 1000;
+		int remainingMs = total - elapsed;
+
+		if (remainingMs <= 0)
+		{
+			DestroyIntruderVehicle(state);
+			return;
+		}
+
+		int remaining = (remainingMs + 999) / 1000;
+		if (remaining == state.m_iLastIntruderSecond)
+			return;
+
+		state.m_iLastIntruderSecond = remaining;
+		PrintFormat(
+			"[BPS] ENEMY VEHICLE COUNTDOWN | Vehicle=%1 | Remaining=%2s",
+			state.m_Vehicle,
+			remaining
+		);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected void DestroyIntruderVehicle(BPS_VehicleState state)
+	{
+		if (!state || !state.m_Vehicle)
+			return;
+
+		IEntity vehicle = state.m_Vehicle;
+
+		// Last chance checks: leaving/capture on the same tick must cancel destruction.
+		if (!BPS_IsEntityInsideShape(vehicle))
+		{
+			state.ResetIntruder();
+			return;
+		}
+
+		if (BPS_GetVehicleRelation(vehicle) != BPS_EVehicleRelation.Enemy)
+		{
+			state.ResetIntruder();
+			return;
+		}
+
+		SCR_DamageManagerComponent manager = SCR_DamageManagerComponent.GetDamageManager(vehicle);
+		if (!manager)
+		{
+			PrintFormat("[BPS] Cannot destroy enemy vehicle: no DamageManager | Vehicle=%1", vehicle);
+			state.ResetIntruder();
+			return;
+		}
+
+		if (manager.IsDestroyed())
+		{
+			state.ResetIntruder();
+			return;
+		}
+
+		PrintFormat("[BPS] ENEMY VEHICLE COUNTDOWN EXPIRED - DESTROYING | Vehicle=%1", vehicle);
+
+		ref Instigator instigator = Instigator.CreateInstigatorGM();
+		if (instigator)
+			manager.Kill(instigator);
+
+		// Fallback for unusual/modded damage managers that do not transition on Kill().
+		if (!manager.IsDestroyed())
+			manager.SetHealthScaled(0);
+
+		state.ResetIntruder();
+	}
+
+	// =============================================================================================
+	// TURRET / MOUNTED WEAPON - CURRENT OCCUPIED SEAT ONLY
+	// =============================================================================================
 	protected bool ProcessCharacterTurret(BPS_CharacterState characterState)
 	{
 		if (!characterState || !characterState.m_Character)
@@ -602,7 +1033,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 		}
 
 		int ammo = muzzle.GetAmmoCount();
-
 		if (state.m_Weapon != weapon || state.m_Muzzle != muzzle)
 		{
 			state.m_Weapon = weapon;
@@ -675,9 +1105,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 				continue;
 			}
 
-			// Reconcile using the same character + vehicle rule used by the presence pass.
-			// This avoids false exits for occupants whose character proxy sits outside the
-			// volume while the vehicle itself is still inside.
 			ChimeraCharacter character = ChimeraCharacter.Cast(state.m_Character);
 			if (!character)
 			{
@@ -685,11 +1112,11 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 				continue;
 			}
 
+			// Reconcile on every logic tick so a character/vehicle exit cannot remain stale for 500 ms.
 			if (state.m_bInside && !BPS_IsCharacterInsideShape(character))
 				state.m_bInside = false;
 
 			bool inside = state.IsInside();
-
 			if (inside && !state.m_bWasInside)
 			{
 				state.m_bWasInside = true;
@@ -709,8 +1136,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 
 			if (inside && IsProtectedFaction(state.m_Character))
 			{
-				// A turret is checked only for the player's current seat. If the seat has no
-				// attached turret, fall back to personal-weapon ammo tracking.
 				bool hasControlledTurret = ProcessCharacterTurret(state);
 				if (!hasControlledTurret && GetCombatDuration() > 0 && HasPersonalWeaponFired(state))
 					ApplyCombatLock(state);
@@ -729,7 +1154,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	protected void OnCharacterEntered(BPS_CharacterState state)
 	{
 		IEntity character = state.m_Character;
-
 		if (IsProtectedFaction(character))
 		{
 			ResetIntruder(state);
@@ -804,7 +1228,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 		}
 
 		int ammo = muzzle.GetAmmoCount();
-
 		if (state.m_Weapon != weapon || state.m_Muzzle != muzzle)
 		{
 			state.m_Weapon = weapon;
@@ -836,6 +1259,9 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	//------------------------------------------------------------------------------------------------
 	protected void ResetPersonalWeaponTracking(BPS_CharacterState state)
 	{
+		if (!state)
+			return;
+
 		state.m_Weapon = null;
 		state.m_Muzzle = null;
 		state.m_iLastAmmo = -1;
@@ -875,11 +1301,10 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	//------------------------------------------------------------------------------------------------
 	protected void ProcessCombatLockExpiration(BPS_CharacterState state)
 	{
-		if (state.m_iCombatLockStartTime < 0 || IsCombatLocked(state))
+		if (!state || state.m_iCombatLockStartTime < 0 || IsCombatLocked(state))
 			return;
 
 		state.m_iCombatLockStartTime = -1;
-
 		ShowMessage(
 			state.m_Character,
 			m_CombatConfig.GetRestoredTitle(),
@@ -889,13 +1314,15 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	}
 
 	// =============================================================================================
-	// INTRUDER
+	// CHARACTER INTRUDER
 	// =============================================================================================
 	protected void StartIntruder(BPS_CharacterState state)
 	{
+		if (!state)
+			return;
+
 		state.m_iIntruderStartTime = System.GetTickCount();
 		state.m_iLastIntruderSecond = GetIntruderDelay();
-
 		ShowMessageParam1(
 			state.m_Character,
 			m_IntruderConfig.GetWarningTitle(),
@@ -908,7 +1335,7 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	//------------------------------------------------------------------------------------------------
 	protected void ProcessIntruder(BPS_CharacterState state)
 	{
-		if (!state.IsInside())
+		if (!state || !state.IsInside())
 			return;
 
 		if (IsProtectedFaction(state.m_Character))
@@ -932,7 +1359,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 			return;
 
 		state.m_iLastIntruderSecond = remaining;
-
 		ShowMessageParam1(
 			state.m_Character,
 			m_IntruderConfig.GetWarningTitle(),
@@ -1025,15 +1451,23 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	//------------------------------------------------------------------------------------------------
 	protected bool ShouldBlockCharacterDamage(IEntity victim, notnull BaseDamageContext damageContext)
 	{
+		ChimeraCharacter victimCharacter = ChimeraCharacter.Cast(victim);
+		if (!victimCharacter)
+			return false;
+
 		if (!IsProtectedFaction(victim))
 			return false;
 
+		// Critical: damage protection uses exact geometry, not the 500 ms presence cache.
+		// This protects bots as well as players and also handles occupants through vehicle root.
+		if (!BPS_IsCharacterInsideShape(victimCharacter))
+			return false;
+
 		BPS_CharacterState victimState = FindCharacterState(victim);
-		if (!victimState || !victimState.IsInside())
+		if (victimState && IsCombatLocked(victimState))
 			return false;
 
 		IEntity attacker = GetDamageInstigatorEntity(damageContext);
-
 		if (
 			m_FriendlyFireConfig.IsEnabled() &&
 			attacker &&
@@ -1041,44 +1475,45 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 			IsProtectedFaction(attacker)
 		)
 		{
-			BPS_CharacterState attackerState = FindCharacterState(attacker);
-			if (attackerState && attackerState.IsInside())
-				ShowFriendlyFireMessage(attacker, attackerState);
-
-			return true;
+			ChimeraCharacter attackerCharacter = ChimeraCharacter.Cast(attacker);
+			if (attackerCharacter && BPS_IsCharacterInsideShape(attackerCharacter))
+			{
+				BPS_CharacterState attackerState = GetOrCreateCharacterState(attackerCharacter);
+				attackerState.m_bInside = true;
+				ShowFriendlyFireMessage(attackerCharacter, attackerState);
+			}
 		}
 
-		if (IsCombatLocked(victimState))
-			return false;
-
+		// Protected/friendly character inside the safe zone receives no hostile damage.
 		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------
 	protected bool ShouldBlockVehicleDamage(IEntity vehicle, notnull BaseDamageContext damageContext)
 	{
-		if (!m_FriendlyFireConfig.IsEnabled())
+		if (!vehicle || !BPS_IsEntityInsideShape(vehicle))
 			return false;
 
-		if (!BPS_IsEntityInsideShape(vehicle))
-			return false;
-
-		if (!IsProtectedFaction(vehicle))
+		// Vehicle protection is independent of attacker resolution and independent of the FF warning
+		// checkbox. The checkbox controls only the warning shown to a friendly attacker.
+		if (BPS_GetVehicleRelation(vehicle) != BPS_EVehicleRelation.Friendly)
 			return false;
 
 		IEntity attacker = GetDamageInstigatorEntity(damageContext);
-		if (!attacker || attacker == vehicle)
-			return false;
-
-		if (!IsProtectedFaction(attacker))
-			return false;
-
-		ChimeraCharacter attackerCharacter = ChimeraCharacter.Cast(attacker);
-		if (attackerCharacter)
+		if (
+			m_FriendlyFireConfig.IsEnabled() &&
+			attacker &&
+			attacker != vehicle &&
+			IsProtectedFaction(attacker)
+		)
 		{
-			BPS_CharacterState attackerState = FindCharacterState(attackerCharacter);
-			if (attackerState && attackerState.IsInside())
+			ChimeraCharacter attackerCharacter = ChimeraCharacter.Cast(attacker);
+			if (attackerCharacter && BPS_IsCharacterInsideShape(attackerCharacter))
+			{
+				BPS_CharacterState attackerState = GetOrCreateCharacterState(attackerCharacter);
+				attackerState.m_bInside = true;
 				ShowFriendlyFireMessage(attackerCharacter, attackerState);
+			}
 		}
 
 		return true;
@@ -1096,8 +1531,10 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	//------------------------------------------------------------------------------------------------
 	protected void ShowFriendlyFireMessage(IEntity attacker, BPS_CharacterState state)
 	{
-		int cooldown = m_FriendlyFireConfig.GetWarningCooldown() * 1000;
+		if (!attacker || !state)
+			return;
 
+		int cooldown = m_FriendlyFireConfig.GetWarningCooldown() * 1000;
 		if (
 			state.m_iFriendlyFireMessageTime >= 0 &&
 			System.GetTickCount(state.m_iFriendlyFireMessageTime) < cooldown
@@ -1107,7 +1544,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 		}
 
 		state.m_iFriendlyFireMessageTime = System.GetTickCount();
-
 		ShowMessage(
 			attacker,
 			m_FriendlyFireConfig.GetTitle(),
@@ -1148,15 +1584,7 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 		if (!ent)
 			return false;
 
-		Faction protectedFaction = GetProtectedFaction();
-		if (!protectedFaction)
-			return false;
-
-		Faction entityFaction = GetEntityFactionForBPS(ent);
-		if (!entityFaction)
-			return false;
-
-		return entityFaction.GetFactionKey() == protectedFaction.GetFactionKey();
+		return BPS_IsFactionProtected(GetEntityFactionForBPS(ent));
 	}
 
 	// =============================================================================================
@@ -1189,12 +1617,10 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	void BPS_BuildMapWorldOutline(notnull array<vector> points)
 	{
 		points.Clear();
-
 		vector transform[4];
 		GetWorldTransform(transform);
 
 		float halfHorizontal = BPS_GetHorizontalSize() * 0.5;
-
 		if (m_eTriggerShapeType == BPS_ETriggerShapeType.Square)
 		{
 			points.Insert(Vector(-halfHorizontal, 0, -halfHorizontal).Multiply4(transform));
@@ -1224,6 +1650,18 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	}
 
 	//------------------------------------------------------------------------------------------------
+	vector BPS_GetMapWorldPosition()
+	{
+		return GetOrigin();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	float BPS_GetMapRadius()
+	{
+		return BPS_GetHorizontalSize() * 0.5;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	bool BPS_IsEnemyMapZoneForLocalPlayer()
 	{
 		if (!m_CampaignBase)
@@ -1244,7 +1682,10 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 		if (!localFaction)
 			return false;
 
-		return localFaction.GetFactionKey() != zoneFaction.GetFactionKey();
+		if (localFaction.GetFactionKey() == zoneFaction.GetFactionKey())
+			return false;
+
+		return !zoneFaction.IsFactionFriendly(localFaction);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1353,11 +1794,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	// =============================================================================================
 	// DEBUG VOLUME - NATIVE ENFUSION SHAPES
 	// =============================================================================================
-	// Cylindrical uses Shape.CreateCylinder(). Square uses Shape.Create(ShapeType.BBOX).
-	// No manual 3D segment/triangle generation is performed by BPS.
-	//
-	// Both runtime and Workbench keep ONE persistent native Shape. Workbench only recreates it
-	// when a size/type/debug property changes; movement/rotation only updates SetMatrix().
 	protected ref Shape m_BPSRuntimeDebugShape;
 #ifdef WORKBENCH
 	protected ref Shape m_BPSWorkbenchDebugShape;
@@ -1366,16 +1802,12 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	//------------------------------------------------------------------------------------------------
 	protected int BPS_GetDebugColor()
 	{
-		// Native primitives contain solid faces. Keep alpha low and use NOOUTLINE so the engine's
-		// internal cylinder triangle mesh is not shown as visible triangle edges.
 		return Color.FromRGBA(0, 255, 70, 55).PackToInt();
 	}
 
 	//------------------------------------------------------------------------------------------------
 	protected ShapeFlags BPS_GetDebugShapeFlags()
 	{
-		// Matches the native Reforger debug-volume approach: persistent, translucent,
-		// double-sided, additive and without mesh outlines.
 		return
 			ShapeFlags.VISIBLE |
 			ShapeFlags.NOZBUFFER |
@@ -1392,22 +1824,13 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 			return;
 
 		vector transform[4];
-
 		if (m_eTriggerShapeType == BPS_ETriggerShapeType.Cylindrical)
 		{
-			// IMPORTANT:
-			// In actual Arma Reforger usage Shape.CreateCylinder is already used as a
-			// vertical (world-Y) primitive. Applying the previous manual axis remap
-			// rotated the native cylinder onto its side.
-			//
-			// Keep the native orientation and update translation only. A cylinder is
-			// rotationally symmetric around its vertical axis, so entity yaw is irrelevant.
 			Math3D.MatrixIdentity4(transform);
 			transform[3] = GetOrigin();
 		}
 		else
 		{
-			// Square safe zones must preserve entity orientation (especially yaw).
 			GetWorldTransform(transform);
 		}
 
@@ -1473,13 +1896,9 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 		if (!m_bShowDebugShape)
 			return;
 
-		// Dedicated/console applications have no renderer. There is no FRAME event in this entity,
-		// so debug visualization contributes no per-frame callback on the dedicated server.
 		if (System.IsConsoleApp())
 			return;
-
 #ifdef WORKBENCH
-		// Edit mode owns a separate Workbench preview Shape.
 		if (!GetGame() || !GetGame().InPlayMode())
 			return;
 #endif
@@ -1512,7 +1931,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	protected void BPS_RebuildWorkbenchDebugShape()
 	{
 		BPS_DestroyWorkbenchDebugShape();
-
 		if (!m_bShowDebugShape)
 			return;
 
@@ -1526,7 +1944,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	override void _WB_OnInit(inout vector mat[4], IEntitySource src)
 	{
 		super._WB_OnInit(mat, src);
-
 		if (src)
 			BPS_WBSyncChangedProperty(src, "m_eTriggerShapeType");
 		if (src)
@@ -1542,8 +1959,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 	//------------------------------------------------------------------------------------------------
 	override bool _WB_OnKeyChanged(BaseContainer src, string key, BaseContainerList ownerContainers, IEntity parent)
 	{
-		// Rebuild the native debug primitive only when one of its own properties changed.
-		// Editing messages, colors or other BPS configuration no longer reallocates the Shape.
 		if (BPS_WBSyncChangedProperty(src, key))
 		{
 			if (GetGame() && GetGame().InPlayMode())
@@ -1632,7 +2047,6 @@ class BPS_SafeZoneTriggerEntity : GenericEntity
 			return;
 		}
 
-		// Moving/rotating the entity requires only a matrix update; no Shape allocation.
 		BPS_UpdateNativeDebugShapeTransform(m_BPSWorkbenchDebugShape);
 	}
 #endif

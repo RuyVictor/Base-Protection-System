@@ -1,7 +1,6 @@
 //------------------------------------------------------------------------------------------------
 // BPS - CONFIGURATION
 //------------------------------------------------------------------------------------------------
-
 // ================================================================================================
 // FRIENDLY MESSAGES
 // ================================================================================================
@@ -40,7 +39,7 @@ class BPS_FriendlyMessagesConfig
 [BaseContainerProps(configRoot: true)]
 class BPS_IntruderConfig
 {
-	[Attribute("20", UIWidgets.EditBox, "Seconds an enemy can remain inside before being killed.")]
+	[Attribute("20", UIWidgets.EditBox, "Seconds an enemy can remain inside before being eliminated. Enemy vehicles use the same countdown before destruction.")]
 	int m_iKillDelaySeconds;
 
 	[Attribute("1.1", UIWidgets.EditBox, "Countdown message duration.")]
@@ -69,6 +68,7 @@ class BPS_IntruderConfig
 	{
 		if (m_iKillDelaySeconds < 1)
 			return 1;
+
 		return m_iKillDelaySeconds;
 	}
 
@@ -112,6 +112,7 @@ class BPS_CombatConfig
 	{
 		if (m_fDuration < 0)
 			return 0;
+
 		return m_fDuration;
 	}
 
@@ -128,7 +129,7 @@ class BPS_CombatConfig
 [BaseContainerProps(configRoot: true)]
 class BPS_FriendlyFireConfig
 {
-	[Attribute("1", UIWidgets.CheckBox, "Block friendly damage against a friendly player who is inside the Safe Zone.")]
+	[Attribute("1", UIWidgets.CheckBox, "Show a warning when a friendly attacker tries to damage protected friendlies or friendly vehicles inside the Safe Zone.")]
 	bool m_bEnabled;
 
 	[Attribute("2", UIWidgets.EditBox, "Warning cooldown.")]
@@ -192,6 +193,7 @@ class BPS_MapDisplayConfig
 	{
 		if (m_fBorderSize < 1)
 			return 1;
+
 		return m_fBorderSize;
 	}
 
@@ -199,8 +201,10 @@ class BPS_MapDisplayConfig
 	{
 		if (alpha < 0)
 			return 0;
+
 		if (alpha > 1)
 			return 1;
+
 		return alpha;
 	}
 
@@ -221,6 +225,7 @@ class BPS_MapDisplayConfig
 		Color source = m_FriendlyBorderColor;
 		if (!source)
 			source = Color.FromRGBA(0, 115, 255, 255);
+
 		return WithAlpha(source, m_fFriendlyBorderAlpha);
 	}
 
@@ -229,6 +234,7 @@ class BPS_MapDisplayConfig
 		Color source = m_FriendlyBackgroundColor;
 		if (!source)
 			source = Color.FromRGBA(0, 115, 255, 255);
+
 		return WithAlpha(source, m_fFriendlyBackgroundAlpha);
 	}
 
@@ -237,6 +243,7 @@ class BPS_MapDisplayConfig
 		Color source = m_EnemyBorderColor;
 		if (!source)
 			source = Color.FromRGBA(255, 0, 0, 255);
+
 		return WithAlpha(source, m_fEnemyBorderAlpha);
 	}
 
@@ -245,6 +252,7 @@ class BPS_MapDisplayConfig
 		Color source = m_EnemyBackgroundColor;
 		if (!source)
 			source = Color.FromRGBA(255, 0, 0, 255);
+
 		return WithAlpha(source, m_fEnemyBackgroundAlpha);
 	}
 }
